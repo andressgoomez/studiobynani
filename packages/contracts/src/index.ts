@@ -30,10 +30,57 @@ export type AttendanceStatus = 'performed' | 'cancelled' | 'absent';
 export interface Service {
   id: string;
   name: string;
+  category: string;
   baseAmountCents: number;
   durationMinutes: number;
   active: boolean;
   enabledFor: UserId[];
+}
+
+export interface CreateServiceRequest {
+  name: string;
+  category: string;
+  baseAmountCents: number;
+  durationMinutes: number;
+}
+
+export interface UpdateServiceRequest {
+  name?: string;
+  category?: string;
+  baseAmountCents?: number;
+  durationMinutes?: number;
+  active?: boolean;
+}
+
+export interface ServiceAssignment {
+  employeeId: UserId;
+  serviceIds: string[];
+}
+
+export interface ServiceAssignmentsResponse {
+  employees: PublicUser[];
+  services: Service[];
+  assignments: ServiceAssignment[];
+}
+
+export interface UpdateServiceAssignmentsRequest {
+  serviceIds: string[];
+}
+
+export interface ManagedEmployee extends PublicUser {
+  active: boolean;
+}
+
+export interface EmployeesResponse {
+  employees: ManagedEmployee[];
+}
+
+export interface UpdateEmployeeStatusRequest {
+  active: boolean;
+}
+
+export interface ChangeEmployeePinRequest {
+  pin: string;
 }
 
 export interface CreateAttendanceRequest {

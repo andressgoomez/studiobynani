@@ -232,4 +232,101 @@ describe('atenciones', () => {
     })).statusCode).toBe(404);
     expect((await owner.app.inject({ method: 'DELETE', url: `/api/v1/attendances/${id}`, headers: { cookie: owner.cookie } })).statusCode).toBe(405);
   });
+
+  it('permite a NANI administrar el catálogo sin alterar importes históricos', async () => {
+    const nani = await authenticated('nani');
+    const employee = await authenticated('lula');
+    const denied = await employee.app.inject({
+      method: 'GET', url: '/api/v1/admin/services', headers: { cookie: employee.cookie }
+    });
+    expect(denied.statusCode).toBe(403);
+    const invalid = await nani.app.inject({
+      method: 'POST', url: '/api/v1/admin/services', headers: { cookie: nani.cookie },
+      payload: { name: '', category: 'Pruebas', baseAmountCents: 0, durationMinutes: 0 }
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.json().error.fields).toMatchObject({
+      name: expect.any(String), baseAmountCents: expect.any(String), durationMinutes: expect.any(String)
+    });
+
+    const created = await nani.app.inject({
+      method: 'POST', url: '/api/v1/admin/services', headers: { cookie: nani.cookie },
+      payload: { name: 'Servicio catálogo test', category: 'Pruebas', baseAmountCents: 12345, durationMinutes: 40 }
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json().service).toMatchObject({
+      name: 'Servicio catálogo test', category: 'Pruebas', baseAmountCents: 12345, durationMinutes: 40, active: true
+    });
+    const serviceId = created.json().service.id;
+
+    const attendance = await employee.app.inject({
+      method: 'POST', url: '/api/v1/attendances', headers: { cookie: employee.cookie },
+      payload: { clientName: 'Histórica catálogo', serviceId, paymentMethod: 'transfer' }
+    });
+    expect(attendance.statusCode).toBe(201);
+    expect(attendance.json().attendance).toMatchObject({ baseAmountCents: 12345, finalAmountCents: 12345 });
+
+    const updated = await nani.app.inject({
+      method: 'PATCH', url: `/api/v1/admin/services/${serviceId}`, headers: { cookie: nani.cookie },
+      payload: { baseAmountCents: 99999, category: 'Actualizada' }
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json().service).toMatchObject({ baseAmountCents: 99999, category: 'Actualizada' });
+
+    const recent = await employee.app.inject({
+      method: 'GET', url: '/api/v1/attendances/recent', headers: { cookie: employee.cookie }
+    });
+    expect(recent.json().attendances).toEqual(expect.arrayContaining([
+      expect.objectContaining({ clientName: 'Histórica catálogo', baseAmountCents: 12345, finalAmountCents: 12345 })
+    ]));
+
+    const disabled = await nani.app.inject({
+      method: 'PATCH', url: `/api/v1/admin/services/${serviceId}`, headers: { cookie: nani.cookie },
+      payload: { active: false }
+    });
+    expect(disabled.statusCode).toBe(200);
+    const unavailable = await employee.app.inject({
+      method: 'POST', url: '/api/v1/attendances/quote', headers: { cookie: employee.cookie },
+      payload: { serviceId, paymentMethod: 'transfer' }
+    });
+    expect(unavailable.statusCode).toBe(400);
+  });
+
+  it('permite a NANI persistir habilitaciones y las valida en el servidor', async () => {
+    const nani = await authenticated('nani');
+    const employee = await authenticated('lola');
+    const listed = await nani.app.inject({
+      method: 'GET', url: '/api/v1/admin/service-assignments', headers: { cookie: nani.cookie }
+    });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json().employees).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'lola', role: 'EMPLOYEE' })]));
+    const originalServiceIds = listed.json().assignments.find((assignment: { employeeId: string }) => assignment.employeeId === 'lola').serviceIds;
+    const serviceId = 'limpieza-extracciones';
+
+    const denied = await employee.app.inject({
+      method: 'PATCH', url: '/api/v1/admin/service-assignments/lola', headers: { cookie: employee.cookie },
+      payload: { serviceIds: [serviceId] }
+    });
+    expect(denied.statusCode).toBe(403);
+
+    const assigned = await nani.app.inject({
+      method: 'PATCH', url: '/api/v1/admin/service-assignments/lola', headers: { cookie: nani.cookie },
+      payload: { serviceIds: [serviceId] }
+    });
+    expect(assigned.statusCode).toBe(200);
+    expect(assigned.json()).toEqual({ employeeId: 'lola', serviceIds: [serviceId] });
+    expect((await employee.app.inject({ method: 'GET', url: '/api/v1/attendances/services', headers: { cookie: employee.cookie } })).json().services)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ id: serviceId })]));
+
+    const unassigned = await nani.app.inject({
+      method: 'PATCH', url: '/api/v1/admin/service-assignments/lola', headers: { cookie: nani.cookie },
+      payload: { serviceIds: originalServiceIds }
+    });
+    expect(unassigned.statusCode).toBe(200);
+    const rejected = await employee.app.inject({
+      method: 'POST', url: '/api/v1/attendances', headers: { cookie: employee.cookie },
+      payload: { clientName: 'Servicio no habilitado', serviceId, paymentMethod: 'transfer' }
+    });
+    expect(rejected.statusCode).toBe(400);
+  });
 });

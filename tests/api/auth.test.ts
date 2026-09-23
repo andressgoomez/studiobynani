@@ -46,5 +46,33 @@ describe('acceso y permisos', () => {
     const setCookie = Array.isArray(login.headers['set-cookie']) ? login.headers['set-cookie'][0] : login.headers['set-cookie'];
     const cookie = setCookie?.split(';')[0];
     expect((await instance.inject({ method: 'GET', url: '/api/v1/admin/summary', headers: { cookie } })).statusCode).toBe(403);
+    expect((await instance.inject({ method: 'GET', url: '/api/v1/admin/employees', headers: { cookie } })).statusCode).toBe(403);
+  });
+
+  it('permite a NANI cambiar PIN y desactivar empleadas sin exponer PINs', async () => {
+    const instance = await app();
+    const login = await instance.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { userId: 'nani', pin: '1234' } });
+    const setCookie = Array.isArray(login.headers['set-cookie']) ? login.headers['set-cookie'][0] : login.headers['set-cookie'];
+    const cookie = setCookie?.split(';')[0];
+    const list = await instance.inject({ method: 'GET', url: '/api/v1/admin/employees', headers: { cookie } });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().employees).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'lula', active: true })
+    ]));
+    expect(JSON.stringify(list.json())).not.toContain('pin');
+
+    const pin = await instance.inject({
+      method: 'PATCH', url: '/api/v1/admin/employees/lula/pin', headers: { cookie }, payload: { pin: '2468' }
+    });
+    expect(pin.statusCode).toBe(200);
+    expect((await instance.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { userId: 'lula', pin: '2468' } })).statusCode).toBe(200);
+
+    const disabled = await instance.inject({
+      method: 'PATCH', url: '/api/v1/admin/employees/lula/status', headers: { cookie }, payload: { active: false }
+    });
+    expect(disabled.statusCode).toBe(200);
+    expect((await instance.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { userId: 'lula', pin: '2468' } })).statusCode).toBe(401);
+    await instance.inject({ method: 'PATCH', url: '/api/v1/admin/employees/lula/status', headers: { cookie }, payload: { active: true } });
+    await instance.inject({ method: 'PATCH', url: '/api/v1/admin/employees/lula/pin', headers: { cookie }, payload: { pin: '1234' } });
   });
 });

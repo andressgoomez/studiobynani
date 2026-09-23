@@ -50,6 +50,19 @@ const sharedServices = [
   ['clase-automaquillaje', 'Clase de automaquillaje', 7000000, 150],
 ] as const;
 
+function categoryForService(id: string): string {
+  if (id.startsWith('limpieza-')) return 'Limpieza facial';
+  if (id.startsWith('peeling-')) return 'Peelings';
+  if (id.startsWith('dermapen-')) return 'Dermapen';
+  if (id === 'hydra-lips') return 'Labios';
+  if (id === 'recuperacion-capilar') return 'Capilar';
+  if (id === 'experiencia-skincare') return 'Experiencia';
+  if (id.startsWith('maquillaje-') || id === 'clase-automaquillaje') return 'Maquillaje';
+  if (id.startsWith('lash-')) return 'Pestañas';
+  if (id.startsWith('combo-')) return 'Combos';
+  return 'Cejas';
+}
+
 const ledisServices = [
   ['limpieza-extracciones', 'Limpieza profunda + extracciones', 3800000, 75],
   ['limpieza-masajes', 'Limpieza facial profunda + masajes faciales', 4000000, 75],
@@ -66,11 +79,11 @@ const ledisServices = [
 
 export const INITIAL_SERVICES: readonly Service[] = [
   ...sharedServices.map(([id, name, baseAmountCents, durationMinutes]) => ({
-    id, name, baseAmountCents, durationMinutes, active: true,
+    id, name, category: categoryForService(id), baseAmountCents, durationMinutes, active: true,
     enabledFor: ['nani', 'lula', 'lola'] as UserId[]
   })),
   ...ledisServices.map(([id, name, baseAmountCents, durationMinutes]) => ({
-    id, name, baseAmountCents, durationMinutes, active: true,
+    id, name, category: categoryForService(id), baseAmountCents, durationMinutes, active: true,
     enabledFor: ['ledis'] as UserId[]
   }))
 ];

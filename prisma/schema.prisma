@@ -33,6 +33,7 @@ model Session {
 model Service {
   id              String       @id
   name            String
+  category        String       @default("General")
   baseAmountCents Int
   durationMinutes Int
   active          Boolean      @default(true)
@@ -62,3 +63,53 @@ model Attendance {
   @@index([employeeId, createdAt])
   @@index([serviceId])
 }
+
+model DailyClosure {
+  id            String    @id
+  businessDate  String    @unique
+  confirmedAt   DateTime
+  confirmedById String
+  reopenedAt    DateTime?
+  reopenedById  String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
+model DailyRemittance {
+  id          String    @id
+  businessDate String
+  employeeId  String
+  amountCents Int
+  sentAt      DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@unique([businessDate, employeeId])
+  @@index([employeeId, businessDate])
+}
+
+model Expense {
+  id          String   @id
+  expenseDate String
+  category    String
+  description String
+  amountCents Int
+  paidById    String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([expenseDate])
+  @@index([category])
+}
+
+model MonthlyClosure {
+  id            String    @id
+  month         String    @unique
+  confirmedAt   DateTime
+  confirmedById String
+  reopenedAt    DateTime?
+  reopenedById  String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+}
+
