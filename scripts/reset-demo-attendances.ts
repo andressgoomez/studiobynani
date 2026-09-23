@@ -44,6 +44,10 @@ const plans = [
 async function main() {
   const services = await prisma.service.findMany();
   const serviceMap = new Map(services.map((service) => [service.id, service]));
+  await prisma.dailyRemittance.deleteMany();
+  await prisma.dailyClosure.deleteMany();
+  await prisma.monthlyClosure.deleteMany();
+  await prisma.expense.deleteMany();
   await prisma.attendance.deleteMany();
 
   let clientIndex = 0;

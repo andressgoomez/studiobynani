@@ -48,6 +48,7 @@ model Attendance {
   employeeId        String
   clientName        String
   serviceId         String
+  serviceIdsJson    String   @default("[]")
   paymentMethod     String
   status            String   @default("performed")
   baseAmountCents   Int
@@ -111,5 +112,18 @@ model MonthlyClosure {
   reopenedById  String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
+}
+
+model AuditLog {
+  id         String   @id
+  actorId    String
+  action     String
+  entityType String
+  entityId   String?
+  detailsJson String  @default("{}")
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
 }
 

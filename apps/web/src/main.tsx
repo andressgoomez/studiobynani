@@ -1,4 +1,4 @@
-import { StrictMode, useCallback, useEffect, useState } from 'react';
+import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { Attendance, ManagedEmployee, PublicUser, Service } from '@studiobynani/contracts';
 import './styles.css';
@@ -14,6 +14,7 @@ type DailySummary = {
 };
 type DailyClosure = { businessDate: string; confirmedAt: string; reopenedAt: string | null };
 type Expense = { id: string; expenseDate: string; category: string; description: string; amountCents: number; createdAt: string; updatedAt: string };
+type PendingRemittance = { date: string; employeeId: string; employeeName: string; amountCents: number; alreadySent: number; remainingCents: number; sentAt: string | null };
 type Report = {
   from: string; to: string;
   closure: { month: string; confirmedAt: string; reopenedAt: string | null } | null;
@@ -21,6 +22,7 @@ type Report = {
   employees: Array<{ employeeId: string; employeeName: string; attentions: number; performed: number; totalCents: number; commissionCents: number; amountToNaniCents: number }>;
   services: Array<{ serviceId: string; serviceName: string; attentions: number; totalCents: number }>;
 };
+type AuditLog = { id: string; actorName: string; action: string; entityType: string; entityId: string | null; details: Record<string, unknown>; createdAt: string };
 
 function formatAmount(cents: number) {
   return `$${(cents / 100).toLocaleString('es-AR')}`;
@@ -41,6 +43,26 @@ function todayInArgentina() {
 
 function monthStartInArgentina() {
   return `${todayInArgentina().slice(0, 7)}-01`;
+}
+
+function auditActionLabel(action: string) {
+  const labels: Record<string, string> = {
+    'attendance.created': 'Creó una atención',
+    'attendance.updated': 'Editó una atención',
+    'daily_closure.confirmed': 'Confirmó un cierre diario',
+    'daily_closure.reopened': 'Reabrió un cierre diario',
+    'monthly_closure.confirmed': 'Confirmó un cierre mensual',
+    'monthly_closure.reopened': 'Reabrió un cierre mensual',
+    'remittance.marked_sent': 'Marcó una entrega como enviada',
+    'remittance.marked_sent_by_admin': 'Marcó una entrega como enviada',
+    'remittance.reset': 'Restableció una entrega',
+    'expense.created': 'Registró un gasto',
+    'expense.deleted': 'Eliminó un gasto',
+    'employee.activated': 'Activó una empleada',
+    'employee.deactivated': 'Desactivó una empleada',
+    'employee.pin_changed': 'Cambió el PIN de una empleada'
+  };
+  return labels[action] ?? action;
 }
 
 function Access({ onLogin }: { onLogin: (user: PublicUser) => void }) {
@@ -104,7 +126,7 @@ function Access({ onLogin }: { onLogin: (user: PublicUser) => void }) {
 
 function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
   const isAdmin = user.role === 'ADMIN';
-  const [adminTab, setAdminTab] = useState<'attendance' | 'catalog' | 'assignments' | 'employees' | 'expenses' | 'reports'>('attendance');
+  const [adminTab, setAdminTab] = useState<'attendance' | 'catalog' | 'assignments' | 'employees' | 'expenses' | 'reports' | 'activity'>('attendance');
   const [selectedDate, setSelectedDate] = useState(todayInArgentina);
   const [services, setServices] = useState<Service[]>([]);
   const [catalog, setCatalog] = useState<Service[]>([]);
@@ -126,7 +148,9 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
   const [pinSaving, setPinSaving] = useState(false);
   const [attendances, setAttendances] = useState<Attendance[]>([]);
   const [clientName, setClientName] = useState('');
-  const [serviceId, setServiceId] = useState('');
+  const [selectedServiceIds, setSelectedServiceIds] = useState<string[]>([]);
+  const servicePickerRef = useRef<HTMLDetailsElement>(null);
+  const serviceId = selectedServiceIds[0] ?? '';
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'transfer'>('transfer');
   const [status, setStatus] = useState<Attendance['status']>('performed');
   const [quote, setQuote] = useState<Quote | null>(null);
@@ -161,10 +185,43 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
   const [reportLoading, setReportLoading] = useState(false);
   const [reportError, setReportError] = useState('');
   const [monthlyClosureSaving, setMonthlyClosureSaving] = useState(false);
+  const [pendingRemittances, setPendingRemittances] = useState<PendingRemittance[]>([]);
+  const [pendingRemittanceSaving, setPendingRemittanceSaving] = useState<string | null>(null);
+  const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState('');
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const idleTimeout = 7 * 60 * 1000;
+    let timer = window.setTimeout(onLogout, idleTimeout);
+    const resetIdleTimer = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(onLogout, idleTimeout);
+    };
+    window.addEventListener('pointerdown', resetIdleTimer);
+    window.addEventListener('keydown', resetIdleTimer);
+    window.addEventListener('touchstart', resetIdleTimer);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('pointerdown', resetIdleTimer);
+      window.removeEventListener('keydown', resetIdleTimer);
+      window.removeEventListener('touchstart', resetIdleTimer);
+    };
+  }, [onLogout]);
+
+  useEffect(() => {
+    const closePicker = (event: PointerEvent) => {
+      if (servicePickerRef.current?.open && !servicePickerRef.current.contains(event.target as Node)) {
+        servicePickerRef.current.open = false;
+      }
+    };
+    document.addEventListener('pointerdown', closePicker);
+    return () => document.removeEventListener('pointerdown', closePicker);
   }, []);
 
   useEffect(() => {
@@ -209,6 +266,27 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
       .catch(() => setReportError('No se pudo cargar el reporte.'))
       .finally(() => setReportLoading(false));
   }, [adminTab, isAdmin, reportFrom, reportTo]);
+
+  useEffect(() => {
+    if (!isAdmin || adminTab !== 'activity') return;
+    setAuditLoading(true); setAuditError('');
+    fetch(`${API}/admin/audit-logs`, { credentials: 'include' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('load');
+        setAuditLogs((await response.json()).logs ?? []);
+      })
+      .catch(() => setAuditError('No se pudo cargar la actividad.'))
+      .finally(() => setAuditLoading(false));
+  }, [adminTab, isAdmin]);
+
+  useEffect(() => {
+    fetch(`${API}/admin/daily-remittances/pending`, { credentials: 'include' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error('load');
+        setPendingRemittances((await response.json()).pending ?? []);
+      })
+      .catch(() => setPendingRemittances([]));
+  }, [isAdmin]);
 
   useEffect(() => {
     fetch(`${API}/daily-closures/${encodeURIComponent(selectedDate)}`, { credentials: 'include' })
@@ -274,6 +352,23 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
       setDailySummary((current) => current ? { ...current, remittances: [...current.remittances.filter((item) => item.employeeId !== user.id), data.remittance] } : current);
     } finally {
       setRemittanceSaving(false);
+    }
+  }
+
+  async function markPendingRemittance(date: string, employeeId: string) {
+    const key = `${date}:${employeeId}`;
+    setPendingRemittanceSaving(key);
+    try {
+      const url = isAdmin
+        ? `${API}/admin/daily-remittances/${encodeURIComponent(date)}/${encodeURIComponent(employeeId)}/mark-sent`
+        : `${API}/daily-remittances/${encodeURIComponent(date)}/mark-sent`;
+      const response = await fetch(url, { method: 'POST', credentials: 'include' });
+      if (!response.ok) throw new Error('save');
+      const pendingResponse = await fetch(`${API}/admin/daily-remittances/pending`, { credentials: 'include' });
+      if (pendingResponse.ok) setPendingRemittances((await pendingResponse.json()).pending ?? []);
+      else setPendingRemittances((current) => current.filter((item) => `${item.date}:${item.employeeId}` !== key));
+    } finally {
+      setPendingRemittanceSaving(null);
     }
   }
 
@@ -462,7 +557,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
       method: 'POST',
       credentials: 'include',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ serviceId, paymentMethod, status }),
+      body: JSON.stringify({ serviceIds: selectedServiceIds, paymentMethod, status }),
       signal: controller.signal
     }).then(async (response) => {
       const data = await response.json();
@@ -476,7 +571,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
       if (!controller.signal.aborted) setQuoteLoading(false);
     });
     return () => controller.abort();
-  }, [serviceId, paymentMethod, status]);
+  }, [selectedServiceIds, paymentMethod, status]);
 
   async function saveAttendance(event: React.FormEvent) {
     event.preventDefault(); setSaving(true); setError(''); setFieldErrors({});
@@ -487,7 +582,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     try {
       const response = await fetch(`${API}/attendances${editingId ? `/${editingId}` : ''}`, {
         method: editingId ? 'PATCH' : 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ clientName, serviceId, paymentMethod, status })
+        body: JSON.stringify({ clientName, serviceIds: selectedServiceIds, paymentMethod, status })
       });
       const data = await response.json();
       if (!response.ok) {
@@ -501,7 +596,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
         .then((summaryResponse) => summaryResponse.ok ? summaryResponse.json() : null)
         .then((summaryData) => summaryData && setDailySummary(summaryData))
         .catch(() => undefined);
-      setClientName(''); setServiceId(''); setPaymentMethod('transfer'); setStatus('performed'); setEditingId(null);
+      setClientName(''); setSelectedServiceIds([]); setPaymentMethod('transfer'); setStatus('performed'); setEditingId(null);
     } catch { setError('No se pudo conectar con la aplicación.'); }
     finally { setSaving(false); }
   }
@@ -509,7 +604,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
   function editAttendance(attendance: Attendance) {
     setEditingId(attendance.id);
     setClientName(attendance.clientName);
-    setServiceId(attendance.serviceId);
+    setSelectedServiceIds(attendance.serviceIds?.length ? attendance.serviceIds : [attendance.serviceId]);
     setPaymentMethod(attendance.paymentMethod);
     setStatus(attendance.status);
     setError('');
@@ -528,20 +623,22 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     .filter((attendance) => !selectedDate || businessDate(attendance.createdAt) === selectedDate)
     .sort((first, second) => new Date(second.createdAt).getTime() - new Date(first.createdAt).getTime());
 
-  return <main className="home-shell"><header><div className="home-brand"><img src="/studio-by-nani-logo.png" alt="StudioByNani" /><div><p className="eyebrow">STUDIOBYNANI</p><h1>Hola, {user.displayName}</h1></div></div><button className="secondary" onClick={onLogout}>Salir</button></header>
+  return <main className="home-shell"><header><div className="home-brand"><img src="/studio-by-nani-logo.png" alt="StudioByNani" /><div><p className="eyebrow">STUDIOBYNANI</p><h1>Hola, {user.displayName}</h1></div></div><button className="secondary" onClick={onLogout}>Cerrar sesión</button></header>
     <nav className={`menu-tabs ${isAdmin ? 'admin-menu' : 'employee-menu'}`} aria-label="Menú principal">
       <button className={adminTab === 'attendance' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('attendance')}>Atenciones</button>
       {isAdmin && <><button className={adminTab === 'catalog' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('catalog')}>Servicios</button>
       <button className={adminTab === 'employees' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('employees')}>Equipo</button></>}
       {isAdmin && <button className={adminTab === 'expenses' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('expenses')}>Gastos</button>}
       {isAdmin && <button className={adminTab === 'reports' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('reports')}>Reportes</button>}
+      {isAdmin && <button className={adminTab === 'activity' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('activity')}>Actividad</button>}
     </nav>
     {isAdmin && adminTab === 'attendance' && <DailyClosureControls date={selectedDate} closure={dailyClosure} saving={closureSaving} error={closureError} onConfirm={confirmDailyClosure} onReopen={reopenDailyClosure} />}
-    {adminTab === 'attendance' && (isAdmin ? <DailyRemittanceOverview summary={dailySummary} /> : <DailyRemittanceSelf summary={dailySummary} saving={remittanceSaving} onMark={markRemittance} />)}
+    {adminTab === 'attendance' && (isAdmin ? <DailyRemittanceOverview date={selectedDate} summary={dailySummary} /> : <DailyRemittanceSelf summary={dailySummary} saving={remittanceSaving} onMark={markRemittance} />)}
     {isAdmin && adminTab === 'reports' && <MonthlyClosureControls report={report} saving={monthlyClosureSaving} onToggle={toggleMonthlyClosure} />}
+    {adminTab === 'attendance' && (isAdmin ? <PendingRemittanceNotice pending={pendingRemittances} saving={pendingRemittanceSaving} onMark={markPendingRemittance} /> : <PendingOwnRemittanceNotice pending={pendingRemittances} saving={pendingRemittanceSaving} onMark={markPendingRemittance} />)}
     <div className={`page-content ${(!isAdmin || adminTab === 'attendance') ? 'attendance-page' : 'admin-page'}`}><>{adminTab === 'attendance' && <section className="day-summary" aria-labelledby="daily-summary-title"><div className="summary-heading"><div><h2 id="daily-summary-title">{isAdmin ? 'Resumen del día' : 'Mi resumen del día'}</h2><p className="muted">{isAdmin ? 'Atenciones y dinero a entregar a NANI del día seleccionado.' : 'Tu facturación y el importe a entregar a NANI del día seleccionado.'}</p></div><div className="date-filter global-date-filter"><label htmlFor="summary-date">Fecha</label><input id="summary-date" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} /><button type="button" className="secondary" onClick={() => setSelectedDate(todayInArgentina())}>Hoy</button>{summaryLoading && <span className="summary-loading">Cargando…</span>}</div></div>{summaryError ? <p className="error" role="alert">{summaryError}</p> : dailySummary && <><div className="summary-totals"><span><strong>{dailySummary.totals.attentions}</strong> atenciones</span><span><strong>{dailySummary.totals.performed}</strong> realizadas</span><span><strong>{formatAmount(dailySummary.totals.totalCents)}</strong> facturado</span><span><strong>{formatAmount(dailySummary.totals.amountToNaniCents)}</strong> para NANI</span></div>{isAdmin && <div className="summary-employees">{dailySummary.employees.length === 0 ? <p className="muted">No hay atenciones registradas para este día.</p> : dailySummary.employees.map((employee) => <div className="summary-employee" key={employee.employeeId}><strong>{employee.employeeName}</strong><span>{employee.attentions} atenciones · {formatAmount(employee.totalCents)}</span><b>Entregar: {formatAmount(employee.amountToNaniCents)}</b></div>)}</div>}{isAdmin && <details className="summary-attendances"><summary>Ver detalle de clientas ({dailySummary.attendances.length})</summary>{dailySummary.attendances.map((attendance) => <div className="summary-attendance" key={attendance.id}><div><strong>{attendance.clientName}</strong><span>{attendance.serviceName} · {attendance.employeeName}</span></div><div><b>{attendance.status === 'performed' ? formatAmount(attendance.finalAmountCents) : 'Sin cargo'}</b><span>{new Date(attendance.createdAt).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })} · {attendance.paymentMethod === 'cash' ? 'Efectivo' : 'Transferencia'}</span></div></div>)}</details>}</>}</section>}{(!isAdmin || adminTab === 'attendance') && <><section className="welcome"><h2>{editingId ? 'Editar atención' : isAdmin ? 'Nueva atención de NANI' : 'Nueva atención'}</h2><form onSubmit={saveAttendance} noValidate>
         <label htmlFor="client-name">Clienta</label><input id="client-name" value={clientName} onChange={(event) => setClientName(event.target.value)} placeholder="Nombre completo" required aria-describedby={fieldErrors.clientName ? 'client-name-error' : undefined} aria-invalid={Boolean(fieldErrors.clientName)} />{fieldErrors.clientName && <p id="client-name-error" className="error" role="alert">{fieldErrors.clientName}</p>}
-        <label htmlFor="service">Servicio</label><select id="service" value={serviceId} onChange={(event) => setServiceId(event.target.value)} required aria-describedby={fieldErrors.serviceId ? 'service-error' : undefined} aria-invalid={Boolean(fieldErrors.serviceId)}><option value="">Seleccioná un servicio</option>{services.map((service) => <option key={service.id} value={service.id}>{service.name} — {formatAmount(service.baseAmountCents)}</option>)}</select>{fieldErrors.serviceId && <p id="service-error" className="error" role="alert">{fieldErrors.serviceId}</p>}
+        <label>Servicios</label><details ref={servicePickerRef} className={`service-picker ${fieldErrors.serviceIds ? 'picker-invalid' : ''}`}><summary>{selectedServiceIds.length === 0 ? 'Seleccioná uno o varios servicios' : `${selectedServiceIds.length} servicio${selectedServiceIds.length === 1 ? '' : 's'} seleccionado${selectedServiceIds.length === 1 ? '' : 's'}`}</summary><div className="service-picker-options">{services.map((service) => <label key={service.id}><input type="checkbox" checked={selectedServiceIds.includes(service.id)} onChange={(event) => setSelectedServiceIds(event.target.checked ? [...selectedServiceIds, service.id] : selectedServiceIds.filter((id) => id !== service.id))} /><span>{service.name}<small>{formatAmount(service.baseAmountCents)}</small></span></label>)}</div></details>{selectedServiceIds.length > 0 && <div className="selected-services">{selectedServiceIds.map((id) => services.find((service) => service.id === id)).filter((service): service is Service => Boolean(service)).map((service) => <span key={service.id}>{service.name}<button type="button" aria-label={`Quitar ${service.name}`} onClick={() => setSelectedServiceIds((current) => current.filter((selectedId) => selectedId !== service.id))}>×</button></span>)}</div>}{fieldErrors.serviceIds && <p id="service-error" className="error" role="alert">{fieldErrors.serviceIds}</p>}
         <label htmlFor="payment">Medio de pago</label><select id="payment" value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as 'cash' | 'transfer')} aria-describedby={fieldErrors.paymentMethod ? 'payment-error' : undefined} aria-invalid={Boolean(fieldErrors.paymentMethod)}><option value="transfer">Transferencia</option><option value="cash">Efectivo</option></select>
         {fieldErrors.paymentMethod && <p id="payment-error" className="error" role="alert">{fieldErrors.paymentMethod}</p>}
         <label htmlFor="status">Estado</label><select id="status" value={status} onChange={(event) => setStatus(event.target.value as Attendance['status'])} aria-describedby={fieldErrors.status ? 'status-error' : undefined} aria-invalid={Boolean(fieldErrors.status)}><option value="performed">Realizada</option><option value="cancelled">Cancelada</option><option value="absent">Ausente</option></select>
@@ -556,7 +653,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
             <span>Entregar a NANI <strong>{formatAmount(quote.amountToNaniCents)}</strong></span>
           </div>}
         </section>
-        {error && <p className="error" role="alert">{error}</p>}<div className="home-actions"><button disabled={saving || !quote} type="submit">{saving ? 'Guardando…' : editingId ? 'Guardar cambios' : 'Guardar atención'}</button>{editingId && <button className="secondary" type="button" onClick={() => { setEditingId(null); setClientName(''); setServiceId(''); setStatus('performed'); setError(''); }}>Cancelar edición</button>}</div>
+        {error && <p className="error" role="alert">{error}</p>}<div className="home-actions"><button disabled={saving || !quote} type="submit">{saving ? 'Guardando…' : editingId ? 'Guardar cambios' : 'Guardar atención'}</button>{editingId && <button className="secondary" type="button" onClick={() => { setEditingId(null); setClientName(''); setSelectedServiceIds([]); setStatus('performed'); setError(''); }}>Cancelar edición</button>}</div>
       </form></section>
       <section className="recent" aria-labelledby="recent-title"><div className="section-heading"><h2 id="recent-title">Mis atenciones</h2></div>{recentLoading ? <p className="muted" role="status">Cargando tus atenciones…</p> : loadError ? <p className="error" role="alert">{loadError}</p> : attendances.length === 0 ? <p className="muted" role="status">Todavía no registraste atenciones.</p> : visibleAttendances.length === 0 ? <p className="muted" role="status">No hay atenciones para esta fecha.</p> : visibleAttendances.map((attendance) => {
         const dayClosed = Boolean(dailyClosure && !dailyClosure.reopenedAt && businessDate(attendance.createdAt) === dailyClosure.businessDate);
@@ -639,8 +736,27 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
         <div className="section-heading"><div><h2 id="reports-title">Reportes</h2><p className="muted">Consultá el rendimiento del estudio por período.</p></div><div className="report-filters"><label htmlFor="report-from">Desde</label><input id="report-from" type="date" value={reportFrom} onChange={(event) => setReportFrom(event.target.value)} /><label htmlFor="report-to">Hasta</label><input id="report-to" type="date" value={reportTo} onChange={(event) => setReportTo(event.target.value)} /></div></div>
         {reportLoading && <p className="muted">Cargando reporte…</p>}{reportError && <p className="error" role="alert">{reportError}</p>}{report && <><div className="summary-totals report-totals"><span><strong>{report.totals.attentions}</strong> atenciones</span><span><strong>{report.totals.performed}</strong> realizadas</span><span><strong>{formatAmount(report.totals.totalCents)}</strong> facturado</span><span><strong>{formatAmount(report.totals.expensesCents)}</strong> gastos</span><span className="report-net"><strong>{formatAmount(report.totals.totalCents - report.totals.expensesCents)}</strong> neto estimado</span></div><h3>Por empleada</h3><div className="report-grid">{report.employees.length === 0 ? <p className="muted">No hay datos para este período.</p> : report.employees.map((employee) => <article className="report-card" key={employee.employeeId}><strong>{employee.employeeName}</strong><span>{employee.attentions} atenciones · {employee.performed} realizadas</span><b>Facturado: {formatAmount(employee.totalCents)}</b><b>Entregar a NANI: {formatAmount(employee.amountToNaniCents)}</b></article>)}</div><h3>Servicios más realizados</h3><div className="report-grid">{report.services.length === 0 ? <p className="muted">No hay servicios realizados en este período.</p> : report.services.map((service) => <article className="report-card" key={service.serviceId}><strong>{service.serviceName}</strong><span>{service.attentions} atenciones</span><b>{formatAmount(service.totalCents)} facturado</b></article>)}</div></>}
       </section>}
+      {isAdmin && adminTab === 'activity' && <section className="catalog" aria-labelledby="activity-title">
+        <div className="section-heading"><div><h2 id="activity-title">Actividad</h2><p className="muted">Historial de acciones realizadas en el sistema. Solo NANI puede consultarlo.</p></div></div>
+        {auditLoading && <p className="muted">Cargando actividad…</p>}{auditError && <p className="error" role="alert">{auditError}</p>}
+        {!auditLoading && !auditError && auditLogs.length === 0 && <p className="muted">Todavía no hay actividad registrada.</p>}
+        <div className="catalog-list activity-list">{auditLogs.map((log) => <article className="catalog-card activity-card" key={log.id}>
+          <div><strong>{auditActionLabel(log.action)}</strong><span>{log.actorName} · {log.entityType}{log.entityId ? ` · ${log.entityId}` : ''}</span></div>
+          <time dateTime={log.createdAt}>{new Date(log.createdAt).toLocaleString('es-AR')}</time>
+        </article>)}</div>
+      </section>}
     </></div>
   </main>;
+}
+
+function PendingRemittanceNotice({ pending, saving, onMark }: { pending: PendingRemittance[]; saving: string | null; onMark: (date: string, employeeId: string) => void }) {
+  if (pending.length === 0) return null;
+  return <section className="pending-remittance" aria-label="Entregas pendientes"><strong>Entregas pendientes de días anteriores</strong><div>{pending.map((item) => <span key={`${item.date}-${item.employeeId}`}><span>{item.employeeName} · {item.date}: {item.alreadySent ? `ya envió ${formatAmount(item.alreadySent)}, falta ${formatAmount(item.remainingCents)}` : `debe entregar ${formatAmount(item.amountCents)}`}</span><button type="button" className="secondary" onClick={() => onMark(item.date, item.employeeId)} disabled={saving === `${item.date}:${item.employeeId}`}>{saving === `${item.date}:${item.employeeId}` ? 'Guardando…' : 'Marcar enviado'}</button></span>)}</div></section>;
+}
+
+function PendingOwnRemittanceNotice({ pending, saving, onMark }: { pending: PendingRemittance[]; saving: string | null; onMark: (date: string, employeeId: string) => void }) {
+  if (pending.length === 0) return null;
+  return <section className="pending-remittance" aria-label="Mis entregas pendientes"><strong>Mis entregas pendientes de días anteriores</strong><div>{pending.map((item) => <span key={`${item.date}-${item.employeeId}`}><span>{item.date}: {item.alreadySent ? `ya enviaste ${formatAmount(item.alreadySent)}, falta ${formatAmount(item.remainingCents)}` : `falta enviar ${formatAmount(item.amountCents)}`}</span><button type="button" className="secondary" onClick={() => onMark(item.date, item.employeeId)} disabled={saving === `${item.date}:${item.employeeId}`}>{saving === `${item.date}:${item.employeeId}` ? 'Guardando…' : 'Marcar enviado'}</button></span>)}</div></section>;
 }
 
 function MonthlyClosureControls({ report, saving, onToggle }: { report: Report | null; saving: boolean; onToggle: () => void }) {
@@ -649,9 +765,10 @@ function MonthlyClosureControls({ report, saving, onToggle }: { report: Report |
   return <section className={`closure-bar ${closed ? 'closure-closed' : ''}`} aria-label="Cierre mensual"><div><strong>{closed ? 'Mes cerrado' : 'Cierre mensual pendiente'}</strong><span>{closed ? `Confirmado el ${new Date(report.closure!.confirmedAt).toLocaleString('es-AR')}` : `Período: ${report.from.slice(0, 7)}.`}</span></div><button className={closed ? 'secondary' : ''} type="button" onClick={onToggle} disabled={saving}>{saving ? 'Guardando…' : closed ? 'Reabrir mes' : 'Confirmar cierre mensual'}</button></section>;
 }
 
-function DailyRemittanceOverview({ summary }: { summary: DailySummary | null }) {
+function DailyRemittanceOverview({ date, summary }: { date: string; summary: DailySummary | null }) {
   if (!summary) return null;
-  return <section className="remittance-bar" aria-label="Estado de entregas"><strong>Entregas a NANI</strong><div className="remittance-list">{summary.employees.filter((employee) => employee.employeeId !== 'nani').map((employee) => {
+  const labelDate = date === todayInArgentina() ? 'hoy' : new Date(`${date}T12:00:00-03:00`).toLocaleDateString('es-AR');
+  return <section className="remittance-bar" aria-label="Estado de entregas"><strong>Entregas a NANI {labelDate}</strong><div className="remittance-list">{summary.employees.filter((employee) => employee.employeeId !== 'nani').map((employee) => {
     const remittance = summary.remittances.find((item) => item.employeeId === employee.employeeId);
     const alreadySent = remittance?.amountCents ?? 0;
     const remaining = Math.max(employee.amountToNaniCents - alreadySent, 0);

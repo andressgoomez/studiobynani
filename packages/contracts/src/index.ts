@@ -86,6 +86,7 @@ export interface ChangeEmployeePinRequest {
 export interface CreateAttendanceRequest {
   clientName: string;
   serviceId: string;
+  serviceIds?: string[];
   paymentMethod: PaymentMethod;
   status?: AttendanceStatus;
 }
@@ -93,6 +94,7 @@ export interface CreateAttendanceRequest {
 export interface UpdateAttendanceRequest {
   clientName: string;
   serviceId: string;
+  serviceIds?: string[];
   paymentMethod: PaymentMethod;
   status: AttendanceStatus;
 }
@@ -103,6 +105,8 @@ export interface Attendance {
   clientName: string;
   serviceId: string;
   serviceName: string;
+  serviceIds: string[];
+  serviceNames: string[];
   paymentMethod: PaymentMethod;
   status: AttendanceStatus;
   baseAmountCents: number;

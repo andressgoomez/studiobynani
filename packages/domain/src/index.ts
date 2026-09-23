@@ -112,3 +112,21 @@ export function calculateAttendanceAmounts(
     amountToNaniCents: finalAmountCents - commissionCents
   };
 }
+
+export function calculateAttendanceBundleAmounts(
+  employeeId: UserId,
+  services: readonly Pick<Service, 'id' | 'name' | 'baseAmountCents'>[],
+  paymentMethod: PaymentMethod,
+  status: AttendanceStatus
+) {
+  return services.reduce((total, service) => {
+    const amounts = calculateAttendanceAmounts(employeeId, service, paymentMethod, status);
+    return {
+      baseAmountCents: total.baseAmountCents + amounts.baseAmountCents,
+      discountCents: total.discountCents + amounts.discountCents,
+      finalAmountCents: total.finalAmountCents + amounts.finalAmountCents,
+      commissionCents: total.commissionCents + amounts.commissionCents,
+      amountToNaniCents: total.amountToNaniCents + amounts.amountToNaniCents
+    };
+  }, { baseAmountCents: 0, discountCents: 0, finalAmountCents: 0, commissionCents: 0, amountToNaniCents: 0 });
+}

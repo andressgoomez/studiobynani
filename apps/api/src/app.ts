@@ -6,12 +6,13 @@ import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/client';
 import { ACTIVE_USERS, type Attendance, type ChangeEmployeePinRequest, type CreateAttendanceRequest, type CreateServiceRequest, type LoginRequest, type SessionUser, type UpdateAttendanceRequest, type UpdateEmployeeStatusRequest, type UpdateServiceRequest } from '@studiobynani/contracts';
-import { calculateAttendanceAmounts, can, DEFAULT_USERS, hashPin, INITIAL_SERVICES, verifyPin } from '@studiobynani/domain';
+import { calculateAttendanceBundleAmounts, calculateAttendanceAmounts, can, DEFAULT_USERS, hashPin, INITIAL_SERVICES, verifyPin } from '@studiobynani/domain';
 
 const SESSION_COOKIE = 'studiobynani_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const SESSION_IDLE_TIMEOUT_MS = 7 * 60 * 1000;
 const ATTENDANCE_EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
-type StoredSession = SessionUser & { expiresAt: number };
+type StoredSession = SessionUser & { expiresAt: number; lastActivityAt: number };
 const sessions = new Map<string, StoredSession>();
 
 function invalid(reply: FastifyReply) {
@@ -27,6 +28,11 @@ function getSession(request: FastifyRequest): SessionUser | undefined {
     sessions.delete(token);
     return undefined;
   }
+  if (session.lastActivityAt + SESSION_IDLE_TIMEOUT_MS <= Date.now()) {
+    sessions.delete(token);
+    return undefined;
+  }
+  session.lastActivityAt = Date.now();
   return session;
 }
 
@@ -41,6 +47,21 @@ function businessDate(date: Date) {
     month: '2-digit',
     day: '2-digit'
   }).format(date);
+}
+
+function requestedServiceIds(body: { serviceId?: unknown; serviceIds?: unknown }) {
+  const ids = Array.isArray(body.serviceIds) ? body.serviceIds.filter((id): id is string => typeof id === 'string' && id.length > 0) : [];
+  if (ids.length) return [...new Set(ids)];
+  return typeof body.serviceId === 'string' && body.serviceId ? [body.serviceId] : [];
+}
+
+function storedServiceIds(attendance: { serviceId: string; serviceIdsJson: string }) {
+  try {
+    const ids = JSON.parse(attendance.serviceIdsJson);
+    return Array.isArray(ids) && ids.length ? ids.filter((id): id is string => typeof id === 'string') : [attendance.serviceId];
+  } catch {
+    return [attendance.serviceId];
+  }
 }
 
 async function requireSession(request: FastifyRequest, reply: FastifyReply): Promise<SessionUser | undefined> {
@@ -62,6 +83,8 @@ export function buildApp(): FastifyInstance {
   const prisma = new PrismaClient();
   const app = Fastify({ logger: false });
   app.register(cookie);
+  const audit = (actorId: string, action: string, entityType: string, entityId?: string, details: Record<string, unknown> = {}) =>
+    prisma.auditLog.create({ data: { id: randomUUID(), actorId, action, entityType, entityId, detailsJson: JSON.stringify(details) } });
   app.addHook('onReady', async () => {
     await prisma.$transaction(async (transaction) => {
       for (const user of DEFAULT_USERS) {
@@ -109,7 +132,7 @@ export function buildApp(): FastifyInstance {
     const sessionId = randomBytes(32).toString('base64url');
     const sessionUser: StoredSession = {
       id: user.id as SessionUser['id'], displayName: user.displayName, role: user.role as SessionUser['role'], sessionId,
-      expiresAt: Date.now() + SESSION_TTL_MS
+      expiresAt: Date.now() + SESSION_TTL_MS, lastActivityAt: Date.now()
     };
     sessions.set(sessionId, sessionUser);
     return reply.setCookie(SESSION_COOKIE, sessionId, {
@@ -265,7 +288,7 @@ export function buildApp(): FastifyInstance {
     return { services: persisted.map((service) => ({ ...service, enabledFor: [session.id] })) };
   });
 
-  app.post<{ Body: { serviceId?: unknown; paymentMethod?: unknown; status?: unknown } }>('/api/v1/attendances/quote', async (request, reply) => {
+  app.post<{ Body: { serviceId?: unknown; serviceIds?: unknown; paymentMethod?: unknown; status?: unknown } }>('/api/v1/attendances/quote', async (request, reply) => {
     const session = await requireSession(request, reply);
     if (!session) return;
     if (!can(session, 'attendance:write:own')) {
@@ -273,7 +296,8 @@ export function buildApp(): FastifyInstance {
     }
     const body = request.body ?? {};
     const fields: Record<string, string> = {};
-    if (typeof body.serviceId !== 'string' || !body.serviceId) fields.serviceId = 'Elegí un servicio.';
+    const serviceIds = requestedServiceIds(body);
+    if (serviceIds.length === 0) fields.serviceIds = 'Elegí al menos un servicio.';
     if (body.paymentMethod !== 'cash' && body.paymentMethod !== 'transfer') fields.paymentMethod = 'Elegí efectivo o transferencia.';
     if (body.status !== undefined && body.status !== 'performed' && body.status !== 'cancelled' && body.status !== 'absent') fields.status = 'Elegí un estado válido.';
     if (Object.keys(fields).length) return validation(reply, fields);
@@ -284,14 +308,14 @@ export function buildApp(): FastifyInstance {
       return reply.code(409).send({ error: { code: 'MONTH_CLOSED', message: 'El cierre mensual ya fue confirmado por NANI.' } });
     }
 
-    const service = await prisma.service.findFirst({ where: { id: body.serviceId as string, active: true, employees: { some: { id: session.id } } } });
-    if (!service) return validation(reply, { serviceId: 'El servicio no está habilitado para tu usuario.' });
+    const services = await prisma.service.findMany({ where: { id: { in: serviceIds }, active: true, employees: { some: { id: session.id } } } });
+    if (services.length !== serviceIds.length) return validation(reply, { serviceIds: 'Todos los servicios deben estar habilitados para tu usuario.' });
 
     return {
       quote: {
-        serviceId: service.id,
-        serviceName: service.name,
-        ...calculateAttendanceAmounts(session.id, service, body.paymentMethod as 'cash' | 'transfer', (body.status ?? 'performed') as 'performed' | 'cancelled' | 'absent')
+        serviceId: services[0].id,
+        serviceName: services.map((service) => service.name).join(' + '),
+        ...calculateAttendanceBundleAmounts(session.id, services, body.paymentMethod as 'cash' | 'transfer', (body.status ?? 'performed') as 'performed' | 'cancelled' | 'absent')
       }
     };
   });
@@ -304,24 +328,27 @@ export function buildApp(): FastifyInstance {
     }
     const body = request.body ?? {};
     const clientName = typeof body.clientName === 'string' ? body.clientName.trim() : '';
+    const serviceIds = requestedServiceIds(body);
     const fields: Record<string, string> = {};
     if (!clientName) fields.clientName = 'Ingresá el nombre completo de la clienta.';
-    if (typeof body.serviceId !== 'string' || !body.serviceId) fields.serviceId = 'Elegí un servicio.';
+    if (serviceIds.length === 0) fields.serviceIds = 'Elegí al menos un servicio.';
     if (body.paymentMethod !== 'cash' && body.paymentMethod !== 'transfer') fields.paymentMethod = 'Elegí efectivo o transferencia.';
     if (body.status !== undefined && body.status !== 'performed' && body.status !== 'cancelled' && body.status !== 'absent') fields.status = 'Elegí un estado válido.';
     if (Object.keys(fields).length) return validation(reply, fields);
 
-    const service = await prisma.service.findFirst({ where: { id: body.serviceId as string, active: true, employees: { some: { id: session.id } } } });
-    if (!service) return validation(reply, { serviceId: 'El servicio no está habilitado para tu usuario.' });
+    const services = await prisma.service.findMany({ where: { id: { in: serviceIds }, active: true, employees: { some: { id: session.id } } } });
+    if (services.length !== serviceIds.length) return validation(reply, { serviceIds: 'Todos los servicios deben estar habilitados para tu usuario.' });
     const status = body.status ?? 'performed';
-    const amounts = calculateAttendanceAmounts(session.id, service, body.paymentMethod!, status);
+    const amounts = calculateAttendanceBundleAmounts(session.id, services, body.paymentMethod!, status);
     const createdAt = new Date().toISOString();
     const attendance: Attendance = {
       id: randomUUID(),
       employeeId: session.id,
       clientName,
-      serviceId: service.id,
-      serviceName: service.name,
+      serviceId: services[0].id,
+      serviceIds,
+      serviceNames: services.map((service) => service.name),
+      serviceName: services.map((service) => service.name).join(' + '),
       paymentMethod: body.paymentMethod!,
       status,
       ...amounts,
@@ -334,6 +361,7 @@ export function buildApp(): FastifyInstance {
         employeeId: attendance.employeeId,
         clientName: attendance.clientName,
         serviceId: attendance.serviceId,
+        serviceIdsJson: JSON.stringify(attendance.serviceIds),
         paymentMethod: attendance.paymentMethod,
         status: attendance.status,
         baseAmountCents: attendance.baseAmountCents,
@@ -350,10 +378,11 @@ export function buildApp(): FastifyInstance {
       where: { businessDate: businessDate(new Date(attendance.createdAt)), employeeId: session.id, sentAt: { not: null } },
       data: { sentAt: null }
     });
+    await audit(session.id, 'attendance.created', 'Attendance', attendance.id, { serviceIds, status });
     return reply.code(201).send({
       attendance: {
         ...attendance,
-        serviceName: persisted.service.name,
+        serviceName: attendance.serviceName,
         createdAt: persisted.createdAt.toISOString()
       }
     });
@@ -377,6 +406,7 @@ export function buildApp(): FastifyInstance {
         employeeId: attendance.employeeId,
         clientName: attendance.clientName,
         serviceId: attendance.serviceId,
+        serviceIds: storedServiceIds(attendance),
         serviceName: attendance.service.name,
         paymentMethod: attendance.paymentMethod,
         status: attendance.status,
@@ -479,6 +509,7 @@ export function buildApp(): FastifyInstance {
       update: { confirmedAt: new Date(), confirmedById: session.id, reopenedAt: null, reopenedById: null },
       create: { id: randomUUID(), businessDate: date, confirmedAt: new Date(), confirmedById: session.id }
     });
+    await audit(session.id, 'daily_closure.confirmed', 'DailyClosure', date);
     return { closure: { businessDate: closure.businessDate, confirmedAt: closure.confirmedAt.toISOString(), reopenedAt: null } };
   });
 
@@ -489,6 +520,7 @@ export function buildApp(): FastifyInstance {
     const closure = await prisma.dailyClosure.findUnique({ where: { businessDate: request.params.date } });
     if (!closure) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'No hay un cierre para esa fecha.' } });
     const updated = await prisma.dailyClosure.update({ where: { businessDate: request.params.date }, data: { reopenedAt: new Date(), reopenedById: session.id } });
+    await audit(session.id, 'daily_closure.reopened', 'DailyClosure', request.params.date);
     return { closure: { businessDate: updated.businessDate, confirmedAt: updated.confirmedAt.toISOString(), reopenedAt: updated.reopenedAt?.toISOString() ?? null } };
   });
 
@@ -505,6 +537,47 @@ export function buildApp(): FastifyInstance {
       update: { amountCents, sentAt: new Date() },
       create: { id: randomUUID(), businessDate: date, employeeId: session.id, amountCents, sentAt: new Date() }
     });
+    await audit(session.id, 'remittance.marked_sent', 'DailyRemittance', `${date}:${session.id}`, { amountCents });
+    return { remittance: { employeeId: remittance.employeeId, amountCents: remittance.amountCents, sentAt: remittance.sentAt?.toISOString() ?? null } };
+  });
+
+  app.get('/api/v1/admin/daily-remittances/pending', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    const today = businessDate(new Date());
+    const attendances = await prisma.attendance.findMany({ include: { employee: true } });
+    const remittances = await prisma.dailyRemittance.findMany();
+    const remittanceMap = new Map(remittances.map((item) => [`${item.businessDate}:${item.employeeId}`, item]));
+    const grouped = new Map<string, { date: string; employeeId: string; employeeName: string; amountCents: number }>();
+    for (const attendance of attendances) {
+      const date = businessDate(attendance.createdAt);
+      if (date >= today || attendance.employeeId === 'nani' || (session.role !== 'ADMIN' && attendance.employeeId !== session.id) || attendance.status !== 'performed' || attendance.amountToNaniCents <= 0) continue;
+      const key = `${date}:${attendance.employeeId}`;
+      const current = grouped.get(key) ?? { date, employeeId: attendance.employeeId, employeeName: attendance.employee.displayName, amountCents: 0 };
+      current.amountCents += attendance.amountToNaniCents;
+      grouped.set(key, current);
+    }
+    const pending = [...grouped.values()].map((item) => {
+      const remittance = remittanceMap.get(`${item.date}:${item.employeeId}`);
+      const alreadySent = remittance?.amountCents ?? 0;
+      return { ...item, alreadySent, remainingCents: Math.max(item.amountCents - alreadySent, 0), sentAt: remittance?.sentAt?.toISOString() ?? null };
+    }).filter((item) => !item.sentAt || item.remainingCents > 0).sort((first, second) => second.date.localeCompare(first.date));
+    return { pending };
+  });
+
+  app.post<{ Params: { date: string; employeeId: string } }>('/api/v1/admin/daily-remittances/:date/:employeeId/mark-sent', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    if (session.role !== 'ADMIN') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede corregir una entrega.' } });
+    const amountCents = (await prisma.attendance.findMany({ where: { employeeId: request.params.employeeId } }))
+      .filter((attendance) => businessDate(attendance.createdAt) === request.params.date && attendance.status === 'performed')
+      .reduce((total, attendance) => total + attendance.amountToNaniCents, 0);
+    const remittance = await prisma.dailyRemittance.upsert({
+      where: { businessDate_employeeId: { businessDate: request.params.date, employeeId: request.params.employeeId } },
+      update: { amountCents, sentAt: new Date() },
+      create: { id: randomUUID(), businessDate: request.params.date, employeeId: request.params.employeeId, amountCents, sentAt: new Date() }
+    });
+    await audit(session.id, 'remittance.marked_sent_by_admin', 'DailyRemittance', `${request.params.date}:${request.params.employeeId}`, { amountCents });
     return { remittance: { employeeId: remittance.employeeId, amountCents: remittance.amountCents, sentAt: remittance.sentAt?.toISOString() ?? null } };
   });
 
@@ -513,6 +586,7 @@ export function buildApp(): FastifyInstance {
     if (!session) return;
     if (session.role !== 'ADMIN') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede corregir una entrega.' } });
     await prisma.dailyRemittance.deleteMany({ where: { businessDate: request.params.date, employeeId: request.params.employeeId } });
+    await audit(session.id, 'remittance.reset', 'DailyRemittance', `${request.params.date}:${request.params.employeeId}`);
     return { ok: true };
   });
 
@@ -551,6 +625,7 @@ export function buildApp(): FastifyInstance {
       return reply.code(409).send({ error: { code: 'MONTH_CLOSED', message: 'El cierre mensual ya fue confirmado por NANI.' } });
     }
     const expense = await prisma.expense.create({ data: { id: randomUUID(), expenseDate, category, description, amountCents, paidById: session.id } });
+    await audit(session.id, 'expense.created', 'Expense', expense.id, { expenseDate, category, amountCents });
     return reply.code(201).send({ expense: { ...expense, createdAt: expense.createdAt.toISOString(), updatedAt: expense.updatedAt.toISOString() } });
   });
 
@@ -563,6 +638,7 @@ export function buildApp(): FastifyInstance {
       return reply.code(409).send({ error: { code: 'MONTH_CLOSED', message: 'El cierre mensual ya fue confirmado por NANI.' } });
     }
     await prisma.expense.delete({ where: { id: request.params.id } }).catch(() => undefined);
+    if (expense) await audit(session.id, 'expense.deleted', 'Expense', expense.id, { expenseDate: expense.expenseDate, amountCents: expense.amountCents });
     return { ok: true };
   });
 
@@ -629,6 +705,7 @@ export function buildApp(): FastifyInstance {
       update: { confirmedAt: new Date(), confirmedById: session.id, reopenedAt: null, reopenedById: null },
       create: { id: randomUUID(), month, confirmedAt: new Date(), confirmedById: session.id }
     });
+    await audit(session.id, 'monthly_closure.confirmed', 'MonthlyClosure', month);
     return { closure: { month: closure.month, confirmedAt: closure.confirmedAt.toISOString(), reopenedAt: null } };
   });
 
@@ -639,6 +716,7 @@ export function buildApp(): FastifyInstance {
     const closure = await prisma.monthlyClosure.findUnique({ where: { month: request.params.month } });
     if (!closure) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'No hay un cierre para ese mes.' } });
     const updated = await prisma.monthlyClosure.update({ where: { month: request.params.month }, data: { reopenedAt: new Date(), reopenedById: session.id } });
+    await audit(session.id, 'monthly_closure.reopened', 'MonthlyClosure', request.params.month);
     return { closure: { month: updated.month, confirmedAt: updated.confirmedAt.toISOString(), reopenedAt: updated.reopenedAt?.toISOString() ?? null } };
   });
 
@@ -659,6 +737,7 @@ export function buildApp(): FastifyInstance {
         employeeId: attendance.employeeId,
         clientName: attendance.clientName,
         serviceId: attendance.serviceId,
+        serviceIds: storedServiceIds(attendance),
         serviceName: attendance.service.name,
         paymentMethod: attendance.paymentMethod,
         status: attendance.status,
@@ -697,23 +776,25 @@ export function buildApp(): FastifyInstance {
 
     const body = request.body ?? {};
     const clientName = typeof body.clientName === 'string' ? body.clientName.trim() : '';
+    const serviceIds = requestedServiceIds(body);
     const fields: Record<string, string> = {};
     if (!clientName) fields.clientName = 'Ingresá el nombre completo de la clienta.';
-    if (typeof body.serviceId !== 'string' || !body.serviceId) fields.serviceId = 'Elegí un servicio.';
+    if (serviceIds.length === 0) fields.serviceIds = 'Elegí al menos un servicio.';
     if (body.paymentMethod !== 'cash' && body.paymentMethod !== 'transfer') fields.paymentMethod = 'Elegí efectivo o transferencia.';
     if (body.status !== undefined && body.status !== 'performed' && body.status !== 'cancelled' && body.status !== 'absent') fields.status = 'Elegí un estado válido.';
     if (Object.keys(fields).length) return validation(reply, fields);
 
-    const service = await prisma.service.findFirst({ where: { id: body.serviceId as string, active: true, employees: { some: { id: session.id } } } });
-    if (!service) return validation(reply, { serviceId: 'El servicio no está habilitado para tu usuario.' });
+    const services = await prisma.service.findMany({ where: { id: { in: serviceIds }, active: true, employees: { some: { id: session.id } } } });
+    if (services.length !== serviceIds.length) return validation(reply, { serviceIds: 'Todos los servicios deben estar habilitados para tu usuario.' });
     const paymentMethod = body.paymentMethod as 'cash' | 'transfer';
     const status = (body.status ?? attendance.status) as Attendance['status'];
-    const amounts = calculateAttendanceAmounts(session.id, service, paymentMethod, status);
+    const amounts = calculateAttendanceBundleAmounts(session.id, services, paymentMethod, status);
     const updated = await prisma.attendance.update({
       where: { id: attendance.id },
       data: {
         clientName,
-        serviceId: service.id,
+        serviceId: services[0].id,
+        serviceIdsJson: JSON.stringify(serviceIds),
         paymentMethod,
         status,
         ...amounts
@@ -724,13 +805,15 @@ export function buildApp(): FastifyInstance {
       where: { businessDate: businessDate(attendance.createdAt), employeeId: session.id, sentAt: { not: null } },
       data: { sentAt: null }
     });
+    await audit(session.id, 'attendance.updated', 'Attendance', updated.id, { serviceIds, status });
     return {
       attendance: {
         id: updated.id,
         employeeId: updated.employeeId,
         clientName: updated.clientName,
         serviceId: updated.serviceId,
-        serviceName: updated.service.name,
+        serviceIds: storedServiceIds(updated),
+        serviceName: services.map((service) => service.name).join(' + '),
         paymentMethod: updated.paymentMethod,
         status: updated.status,
         baseAmountCents: updated.baseAmountCents,
@@ -785,6 +868,7 @@ export function buildApp(): FastifyInstance {
       data: { active: request.body.active },
       select: { id: true, displayName: true, role: true, active: true }
     });
+    await audit(session.id, request.body.active ? 'employee.activated' : 'employee.deactivated', 'User', employee.id);
     return { employee: updated };
   });
 
@@ -800,7 +884,40 @@ export function buildApp(): FastifyInstance {
     const employee = await prisma.user.findFirst({ where: { id: request.params.employeeId, role: 'EMPLOYEE' } });
     if (!employee) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Empleada no encontrada.' } });
     await prisma.user.update({ where: { id: employee.id }, data: { pinHash: hashPin(request.body.pin) } });
+    await audit(session.id, 'employee.pin_changed', 'User', employee.id);
     return { employeeId: employee.id };
+  });
+
+  app.get<{ Querystring: { from?: string; to?: string; actorId?: string; action?: string } }>('/api/v1/admin/audit-logs', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    if (session.id !== 'nani' || !can(session, 'admin:read')) {
+      return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede consultar la actividad.' } });
+    }
+    const { from, to, actorId, action } = request.query;
+    const logs = await prisma.auditLog.findMany({
+      where: {
+        ...(actorId ? { actorId } : {}),
+        ...(action ? { action } : {}),
+        ...(from || to ? { createdAt: { ...(from ? { gte: new Date(`${from}T00:00:00`) } : {}), ...(to ? { lt: new Date(`${to}T23:59:59.999`) } : {}) } } : {})
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 250
+    });
+    const actors = await prisma.user.findMany({ where: { id: { in: [...new Set(logs.map((log) => log.actorId))] } }, select: { id: true, displayName: true } });
+    const actorNames = new Map(actors.map((actor) => [actor.id, actor.displayName]));
+    return {
+      logs: logs.map((log) => ({
+        id: log.id,
+        actorId: log.actorId,
+        actorName: actorNames.get(log.actorId) ?? log.actorId,
+        action: log.action,
+        entityType: log.entityType,
+        entityId: log.entityId,
+        details: JSON.parse(log.detailsJson),
+        createdAt: log.createdAt.toISOString()
+      }))
+    };
   });
 
   return app;
