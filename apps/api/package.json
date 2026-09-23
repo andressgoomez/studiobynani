@@ -1,0 +1,16 @@
+{
+  "name": "@studiobynani/api",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@studiobynani/contracts": "0.1.0",
+    "@studiobynani/domain": "0.1.0",
+    "@fastify/cookie": "^11.0.2",
+    "fastify": "^5.12.5"
+  }
+}

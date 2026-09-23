@@ -1,0 +1,64 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String   @id
+  displayName String
+  role        String
+  active      Boolean  @default(true)
+  pinHash     String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  sessions    Session[]
+  attendances Attendance[]
+  services    Service[] @relation("ServiceEmployees")
+}
+
+model Session {
+  id        String   @id
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model Service {
+  id              String       @id
+  name            String
+  baseAmountCents Int
+  durationMinutes Int
+  active          Boolean      @default(true)
+  employees       User[]       @relation("ServiceEmployees")
+  attendances     Attendance[]
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+}
+
+model Attendance {
+  id                String   @id
+  employeeId        String
+  clientName        String
+  serviceId         String
+  paymentMethod     String
+  status            String   @default("performed")
+  baseAmountCents   Int
+  discountCents     Int
+  finalAmountCents  Int
+  commissionCents    Int
+  amountToNaniCents Int
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  employee          User     @relation(fields: [employeeId], references: [id])
+  service           Service  @relation(fields: [serviceId], references: [id])
+
+  @@index([employeeId, createdAt])
+  @@index([serviceId])
+}
