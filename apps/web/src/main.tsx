@@ -7,14 +7,19 @@ const API = '/api/v1';
 type Quote = Pick<Attendance, 'serviceId' | 'serviceName' | 'baseAmountCents' | 'discountCents' | 'finalAmountCents' | 'commissionCents' | 'amountToNaniCents'>;
 type DailySummary = {
   date: string;
-  employees: Array<{ employeeId: string; employeeName: string; attentions: number; performed: number; totalCents: number; commissionCents: number; amountToNaniCents: number; cashCents: number; transferCents: number }>;
-  totals: { attentions: number; performed: number; totalCents: number; amountToNaniCents: number };
-  remittances: Array<{ employeeId: string; amountCents: number; sentAt: string | null }>;
+  employees: Array<{ employeeId: string; employeeName: string; attentions: number; performed: number; totalCents: number; commissionCents: number; amountToNaniCents: number; cashCents: number; transferCents: number; productSales: number; productTotalCents: number; productAmountToNaniCents: number; commonBoxCents: number }>;
+  totals: { attentions: number; performed: number; totalCents: number; amountToNaniCents: number; productSales: number; productQuantity: number; productTotalCents: number; productAmountToNaniCents: number; commonBoxCents: number };
+  remittances: Array<{ employeeId: string; amountCents: number; sentAt: string | null; receivedAt: string | null }>;
   attendances: Array<{ id: string; employeeName: string; clientName: string; serviceName: string; status: Attendance['status']; paymentMethod: Attendance['paymentMethod']; finalAmountCents: number; amountToNaniCents: number; createdAt: string }>;
+  productSales: Array<{ id: string; sellerName: string; clientName: string; totalCents: number; amountToNaniCents: number; commonBoxCents: number; createdAt: string; items: string[] }>;
 };
+type AttendanceDraft = { clientName: string; serviceIds: string[]; paymentMethod: Attendance['paymentMethod']; status: Attendance['status'] };
 type DailyClosure = { businessDate: string; confirmedAt: string; reopenedAt: string | null };
 type Expense = { id: string; expenseDate: string; category: string; description: string; amountCents: number; createdAt: string; updatedAt: string };
+type Product = { id: string; name: string; category: string; supplierType: 'once' | 'local'; supplierName: string; currentCostCents: number; salePriceCents: number; lowStockThreshold: number; active: boolean; stock: number };
+type ProductSale = { id: string; clientName: string; paymentMethod: 'cash' | 'transfer'; totalCents: number; amountToNaniCents: number; commonBoxCents: number; status?: 'completed' | 'cancelled'; sellerName: string; createdAt: string; items: Array<{ productId: string; productName: string; quantity: number; lineTotalCents: number }> };
 type PendingRemittance = { date: string; employeeId: string; employeeName: string; amountCents: number; alreadySent: number; remainingCents: number; sentAt: string | null };
+type MonthRemittance = { date: string; employeeId: string; employeeName: string; amountCents: number; sentAmountCents: number; sentAt: string | null; receivedAt: string | null; status: 'pendiente' | 'enviado' | 'recibido' };
 type Report = {
   from: string; to: string;
   closure: { month: string; confirmedAt: string; reopenedAt: string | null } | null;
@@ -37,6 +42,34 @@ function businessDate(isoDate: string) {
   }).format(new Date(isoDate));
 }
 
+function formatDisplayDate(value: string) {
+  const [year, month, day] = value.slice(0, 10).split('-');
+  return year && month && day ? `${day}/${month}/${year}` : value;
+}
+
+function formatDisplayMonth(value: string) {
+  const [year, month] = value.slice(0, 7).split('-');
+  return year && month ? `${month}/${year}` : value;
+}
+
+function formatDisplayDateTime(value: string) {
+  const date = new Date(value);
+  const parts = new Intl.DateTimeFormat('es-AR', {
+    timeZone: 'America/Argentina/Buenos_Aires',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).formatToParts(date).reduce<Record<string, string>>((result, part) => ({ ...result, [part.type]: part.value }), {});
+  return `${parts.day}/${parts.month}/${parts.year}, ${parts.hour}:${parts.minute}`;
+}
+
+function formatDisplayTime(value: string) {
+  return new Intl.DateTimeFormat('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value));
+}
+
 function todayInArgentina() {
   return businessDate(new Date().toISOString());
 }
@@ -55,6 +88,8 @@ function auditActionLabel(action: string) {
     'monthly_closure.reopened': 'Reabrió un cierre mensual',
     'remittance.marked_sent': 'Marcó una entrega como enviada',
     'remittance.marked_sent_by_admin': 'Marcó una entrega como enviada',
+    'remittance.marked_received': 'Confirmó que recibió una entrega',
+    'remittance.receipt_cleared': 'Quitó la confirmación de una entrega',
     'remittance.reset': 'Restableció una entrega',
     'expense.created': 'Registró un gasto',
     'expense.deleted': 'Eliminó un gasto',
@@ -126,16 +161,18 @@ function Access({ onLogin }: { onLogin: (user: PublicUser) => void }) {
 
 function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
   const isAdmin = user.role === 'ADMIN';
-  const [adminTab, setAdminTab] = useState<'attendance' | 'catalog' | 'assignments' | 'employees' | 'expenses' | 'reports' | 'activity'>('attendance');
+  const [adminTab, setAdminTab] = useState<'attendance' | 'catalog' | 'assignments' | 'employees' | 'expenses' | 'reports' | 'activity' | 'products' | 'remittances'>('attendance');
   const [selectedDate, setSelectedDate] = useState(todayInArgentina);
   const [services, setServices] = useState<Service[]>([]);
   const [catalog, setCatalog] = useState<Service[]>([]);
   const [catalogEditingId, setCatalogEditingId] = useState<string | null>(null);
+  const [serviceToDelete, setServiceToDelete] = useState<Service | null>(null);
   const [catalogName, setCatalogName] = useState('');
   const [catalogCategory, setCatalogCategory] = useState('');
   const [catalogPrice, setCatalogPrice] = useState('');
   const [catalogDuration, setCatalogDuration] = useState('');
   const [catalogError, setCatalogError] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
   const [catalogSaving, setCatalogSaving] = useState(false);
   const [employees, setEmployees] = useState<PublicUser[]>([]);
   const [assignments, setAssignments] = useState<{ employeeId: string; serviceIds: string[] }[]>([]);
@@ -145,6 +182,9 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
   const [employeeError, setEmployeeError] = useState('');
   const [pinEmployeeId, setPinEmployeeId] = useState<string | null>(null);
   const [newPin, setNewPin] = useState('');
+  const [newEmployeeName, setNewEmployeeName] = useState('');
+  const [newEmployeePin, setNewEmployeePin] = useState('');
+  const [employeeCreateSaving, setEmployeeCreateSaving] = useState(false);
   const [pinSaving, setPinSaving] = useState(false);
   const [attendances, setAttendances] = useState<Attendance[]>([]);
   const [clientName, setClientName] = useState('');
@@ -162,6 +202,8 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
   const [recentLoading, setRecentLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [attendanceToEdit, setAttendanceToEdit] = useState<Attendance | null>(null);
+  const [attendanceEditDraft, setAttendanceEditDraft] = useState<AttendanceDraft>({ clientName: '', serviceIds: [], paymentMethod: 'transfer', status: 'performed' });
   const [now, setNow] = useState(() => Date.now());
   const [dailySummary, setDailySummary] = useState<DailySummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -187,9 +229,42 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
   const [monthlyClosureSaving, setMonthlyClosureSaving] = useState(false);
   const [pendingRemittances, setPendingRemittances] = useState<PendingRemittance[]>([]);
   const [pendingRemittanceSaving, setPendingRemittanceSaving] = useState<string | null>(null);
+  const [remittanceMonth, setRemittanceMonth] = useState(todayInArgentina().slice(0, 7));
+  const [monthRemittances, setMonthRemittances] = useState<MonthRemittance[]>([]);
+  const [monthRemittancesError, setMonthRemittancesError] = useState('');
+  const [receiptSaving, setReceiptSaving] = useState<string | null>(null);
+  const [remittanceActionError, setRemittanceActionError] = useState('');
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState('');
+  const [products, setProducts] = useState<Product[]>([]);
+  const [productSales, setProductSales] = useState<ProductSale[]>([]);
+  const [productClientName, setProductClientName] = useState('');
+  const [productPaymentMethod, setProductPaymentMethod] = useState<'cash' | 'transfer'>('transfer');
+  const [productQuantities, setProductQuantities] = useState<Record<string, number>>({});
+  const [productSaving, setProductSaving] = useState(false);
+  const [productError, setProductError] = useState('');
+  const [productTab, setProductTab] = useState<'sales' | 'catalog'>('sales');
+  const [productSearch, setProductSearch] = useState('');
+  const [editingProductSaleId, setEditingProductSaleId] = useState<string | null>(null);
+  const [saleToEdit, setSaleToEdit] = useState<ProductSale | null>(null);
+  const [newProductName, setNewProductName] = useState('');
+  const [newProductSupplierType, setNewProductSupplierType] = useState<'once' | 'local'>('local');
+  const [newProductSupplierName, setNewProductSupplierName] = useState('');
+  const [newProductCost, setNewProductCost] = useState('');
+  const [newProductPrice, setNewProductPrice] = useState('');
+  const [restockId, setRestockId] = useState<string | null>(null);
+  const [restockQuantity, setRestockQuantity] = useState('');
+  const [restockCost, setRestockCost] = useState('');
+  const [restockSalePrice, setRestockSalePrice] = useState('');
+  const [productToDelete, setProductToDelete] = useState<Product | null>(null);
+  const [saleToCancel, setSaleToCancel] = useState<ProductSale | null>(null);
+
+  function showSuccess(message: string) {
+    setSuccessMessage(message);
+    window.setTimeout(() => setSuccessMessage(''), 2500);
+  }
+  const [restockSearch, setRestockSearch] = useState('');
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -243,6 +318,18 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     }).catch(() => setLoadError('No se pudieron cargar tus atenciones.'))
       .finally(() => setRecentLoading(false));
   }, [isAdmin, onLogout]);
+
+  useEffect(() => {
+    Promise.all([
+      fetch(`${API}/products`, { credentials: 'include' }),
+      fetch(`${API}/product-sales/recent?date=${encodeURIComponent(selectedDate)}`, { credentials: 'include' })
+    ]).then(async ([productsResponse, salesResponse]) => {
+      if (productsResponse.status === 401 || salesResponse.status === 401) return onLogout();
+      if (!productsResponse.ok || !salesResponse.ok) throw new Error('load');
+      setProducts((await productsResponse.json()).products ?? []);
+      setProductSales((await salesResponse.json()).sales ?? []);
+    }).catch(() => setProductError('No se pudieron cargar los productos.'));
+  }, [isAdmin, onLogout, selectedDate]);
 
   useEffect(() => {
     setSummaryLoading(true); setSummaryError('');
@@ -310,6 +397,25 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
       .catch(() => setExpenseError('No se pudieron cargar los gastos.'));
   }, [expenseMonth, isAdmin]);
 
+  const loadMonthRemittances = useCallback(() => {
+    setMonthRemittancesError('');
+    return fetch(`${API}/daily-remittances?month=${encodeURIComponent(remittanceMonth)}`, { credentials: 'include' })
+      .then(async (response) => {
+        if (response.status === 401) {
+          onLogout();
+          return;
+        }
+        if (!response.ok) throw new Error('load');
+        setMonthRemittances((await response.json()).remittances ?? []);
+      })
+      .catch(() => setMonthRemittancesError('No se pudieron cargar las entregas.'));
+  }, [onLogout, remittanceMonth]);
+
+  useEffect(() => {
+    if (adminTab !== 'remittances') return;
+    loadMonthRemittances();
+  }, [adminTab, loadMonthRemittances]);
+
   async function confirmDailyClosure() {
     setClosureSaving(true); setClosureError('');
     try {
@@ -367,8 +473,142 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
       const pendingResponse = await fetch(`${API}/admin/daily-remittances/pending`, { credentials: 'include' });
       if (pendingResponse.ok) setPendingRemittances((await pendingResponse.json()).pending ?? []);
       else setPendingRemittances((current) => current.filter((item) => `${item.date}:${item.employeeId}` !== key));
+      if (isAdmin && date === selectedDate) {
+        const summaryResponse = await fetch(`${API}/admin/daily-summary?date=${encodeURIComponent(selectedDate)}`, { credentials: 'include' });
+        if (summaryResponse.ok) setDailySummary(await summaryResponse.json());
+      }
+      if (adminTab === 'remittances') await loadMonthRemittances();
+      showSuccess('Entrega marcada como enviada.');
     } finally {
       setPendingRemittanceSaving(null);
+    }
+  }
+
+  async function setRemittanceReceipt(date: string, employeeId: string, action: 'receive' | 'clear') {
+    const key = `${date}:${employeeId}`;
+    setReceiptSaving(key);
+    setRemittanceActionError('');
+    try {
+      const response = await fetch(`${API}/admin/daily-remittances/${encodeURIComponent(date)}/${encodeURIComponent(employeeId)}/${action === 'receive' ? 'mark-received' : 'clear-received'}`, { method: 'POST', credentials: 'include' });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error?.message ?? 'No se pudo actualizar la recepción.');
+      if (date === selectedDate) {
+        const summaryResponse = await fetch(`${API}/admin/daily-summary?date=${encodeURIComponent(selectedDate)}`, { credentials: 'include' });
+        if (summaryResponse.ok) setDailySummary(await summaryResponse.json());
+      }
+      const pendingResponse = await fetch(`${API}/admin/daily-remittances/pending`, { credentials: 'include' });
+      if (pendingResponse.ok) setPendingRemittances((await pendingResponse.json()).pending ?? []);
+      if (adminTab === 'remittances') await loadMonthRemittances();
+      showSuccess(action === 'receive' ? 'Entrega marcada como recibida.' : 'La entrega volvió a enviada.');
+    } catch (failure) {
+      setRemittanceActionError(failure instanceof Error ? failure.message : 'No se pudo actualizar la recepción.');
+    } finally {
+      setReceiptSaving(null);
+    }
+  }
+
+  async function saveProductSale(event: React.FormEvent) {
+    event.preventDefault();
+    const items = Object.entries(productQuantities).filter(([, quantity]) => quantity > 0).map(([productId, quantity]) => ({ productId, quantity }));
+    if (!productClientName.trim() || items.length === 0) return setProductError('Ingresá la clienta y elegí al menos un producto.');
+    setProductSaving(true); setProductError('');
+    try {
+      const response = await fetch(editingProductSaleId ? `${API}/product-sales/${editingProductSaleId}` : `${API}/product-sales`, {
+        method: editingProductSaleId ? 'PATCH' : 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ clientName: productClientName, paymentMethod: productPaymentMethod, items })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message ?? 'No se pudo guardar la venta.');
+      const salesResponse = await fetch(`${API}/product-sales/recent?date=${encodeURIComponent(selectedDate)}`, { credentials: 'include' });
+      if (salesResponse.ok) setProductSales((await salesResponse.json()).sales ?? []);
+      setProductClientName(''); setProductQuantities({}); setEditingProductSaleId(null); setSaleToEdit(null);
+      showSuccess(editingProductSaleId ? 'Venta actualizada correctamente.' : 'Venta registrada correctamente.');
+      const refreshed = await fetch(`${API}/products`, { credentials: 'include' });
+      if (refreshed.ok) setProducts((await refreshed.json()).products ?? []);
+      const summaryResponse = await fetch(`${API}/admin/daily-summary?date=${encodeURIComponent(selectedDate)}`, { credentials: 'include' });
+      if (summaryResponse.ok) setDailySummary(await summaryResponse.json());
+    } catch (failure) {
+      setProductError(failure instanceof Error ? failure.message : 'No se pudo guardar la venta.');
+    } finally {
+      setProductSaving(false);
+    }
+  }
+
+  async function cancelProductSale() {
+    if (!saleToCancel) return;
+    setProductSaving(true); setProductError('');
+    try {
+      const response = await fetch(`${API}/product-sales/${encodeURIComponent(saleToCancel.id)}/cancel`, { method: 'POST', credentials: 'include' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message ?? 'No se pudo cancelar la venta.');
+      const salesResponse = await fetch(`${API}/product-sales/recent?date=${encodeURIComponent(selectedDate)}`, { credentials: 'include' });
+      if (salesResponse.ok) setProductSales((await salesResponse.json()).sales ?? []);
+      const productsResponse = await fetch(`${API}/products`, { credentials: 'include' });
+      if (productsResponse.ok) setProducts((await productsResponse.json()).products ?? []);
+      const summaryResponse = await fetch(`${API}/admin/daily-summary?date=${encodeURIComponent(selectedDate)}`, { credentials: 'include' });
+      if (summaryResponse.ok) setDailySummary(await summaryResponse.json());
+      setSaleToCancel(null);
+      showSuccess('Venta cancelada correctamente.');
+    } catch (failure) {
+      setProductError(failure instanceof Error ? failure.message : 'No se pudo cancelar la venta.');
+    } finally {
+      setProductSaving(false);
+    }
+  }
+
+  function editProductSale(sale: ProductSale) {
+    if (Date.now() > new Date(sale.createdAt).getTime() + 24 * 60 * 60 * 1000) return;
+    setEditingProductSaleId(sale.id);
+    setProductClientName(sale.clientName);
+    setProductPaymentMethod(sale.paymentMethod);
+    setProductQuantities(Object.fromEntries(sale.items.map((item) => [item.productId, item.quantity])));
+    setProductError('');
+    setSaleToEdit(sale);
+  }
+
+  async function createProduct(event: React.FormEvent) {
+    event.preventDefault(); setProductSaving(true); setProductError('');
+    try {
+      const response = await fetch(`${API}/admin/products`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+        name: newProductName, supplierType: newProductSupplierType, supplierName: newProductSupplierName,
+        currentCostCents: Math.round(Number(newProductCost.replace(',', '.')) * 100), salePriceCents: Math.round(Number(newProductPrice.replace(',', '.')) * 100)
+      }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message ?? 'No se pudo crear el producto.');
+      setProducts((current) => [...current, { ...data.product, stock: 0 }]);
+      setNewProductName(''); setNewProductSupplierName(''); setNewProductCost(''); setNewProductPrice('');
+    } catch (failure) { setProductError(failure instanceof Error ? failure.message : 'No se pudo crear el producto.'); }
+    finally { setProductSaving(false); }
+  }
+
+  async function restockProduct(event: React.FormEvent) {
+    event.preventDefault(); if (!restockId) return;
+    setProductSaving(true); setProductError('');
+    try {
+      const response = await fetch(`${API}/admin/products/${encodeURIComponent(restockId)}/purchases`, { method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ quantity: Number(restockQuantity), unitCostCents: Math.round(Number(restockCost.replace(',', '.')) * 100), salePriceCents: Math.round(Number(restockSalePrice.replace(',', '.')) * 100) }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message ?? 'No se pudo registrar la compra.');
+      const refreshed = await fetch(`${API}/products`, { credentials: 'include' });
+      if (refreshed.ok) setProducts((await refreshed.json()).products ?? []);
+      setRestockId(null); setRestockQuantity(''); setRestockCost(''); setRestockSalePrice('');
+    } catch (failure) { setProductError(failure instanceof Error ? failure.message : 'No se pudo registrar la compra.'); }
+    finally { setProductSaving(false); }
+  }
+
+  async function deleteProduct() {
+    if (!productToDelete) return;
+    setProductSaving(true); setProductError('');
+    try {
+      const response = await fetch(`${API}/admin/products/${encodeURIComponent(productToDelete.id)}`, { method: 'DELETE', credentials: 'include' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message ?? 'No se pudo eliminar el producto.');
+      setProducts((current) => current.filter((item) => item.id !== productToDelete.id));
+      setProductToDelete(null);
+      showSuccess('Producto eliminado correctamente.');
+    } catch (failure) {
+      setProductError(failure instanceof Error ? failure.message : 'No se pudo eliminar el producto.');
+    } finally {
+      setProductSaving(false);
     }
   }
 
@@ -403,7 +643,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     if (!report) return;
     setMonthlyClosureSaving(true);
     try {
-      const month = report.from.slice(0, 7);
+      const month = formatDisplayMonth(report.from);
       const url = report.closure && !report.closure.reopenedAt
         ? `${API}/admin/monthly-closures/${encodeURIComponent(month)}/reopen`
         : `${API}/admin/monthly-closures`;
@@ -496,6 +736,25 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     }
   }
 
+  async function createEmployee(event: React.FormEvent) {
+    event.preventDefault();
+    setEmployeeCreateSaving(true); setEmployeeError('');
+    try {
+      const response = await fetch(`${API}/admin/employees`, {
+        method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ displayName: newEmployeeName, pin: newEmployeePin })
+      });
+      const data = await response.json();
+      if (!response.ok) return setEmployeeError(data.error?.message ?? 'No se pudo crear la empleada.');
+      setManagedEmployees((current) => [...current, data.employee]);
+      setNewEmployeeName(''); setNewEmployeePin('');
+    } catch {
+      setEmployeeError('No se pudo conectar con la aplicación.');
+    } finally {
+      setEmployeeCreateSaving(false);
+    }
+  }
+
   async function saveCatalogService(event: React.FormEvent) {
     event.preventDefault();
     setCatalogSaving(true); setCatalogError('');
@@ -527,6 +786,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     setCatalogEditingId(service.id); setCatalogName(service.name); setCatalogCategory(service.category);
     setCatalogPrice(String(service.baseAmountCents / 100)); setCatalogDuration(String(service.durationMinutes));
     setCatalogError('');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   async function toggleCatalogService(service: Service) {
@@ -541,6 +801,24 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     setServices((current) => service.active
       ? current.filter((item) => item.id !== service.id)
       : [...current, data.service]);
+  }
+
+  async function deleteCatalogService() {
+    if (!serviceToDelete) return;
+    setCatalogSaving(true); setCatalogError('');
+    try {
+      const response = await fetch(`${API}/admin/services/${encodeURIComponent(serviceToDelete.id)}`, { method: 'DELETE', credentials: 'include' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message ?? 'No se pudo eliminar el servicio.');
+      setCatalog((current) => current.map((item) => item.id === serviceToDelete.id ? data.service : item));
+      setServices((current) => current.filter((item) => item.id !== serviceToDelete.id));
+      setServiceToDelete(null);
+      showSuccess('Servicio eliminado correctamente.');
+    } catch (failure) {
+      setCatalogError(failure instanceof Error ? failure.message : 'No se pudo eliminar el servicio.');
+    } finally {
+      setCatalogSaving(false);
+    }
   }
 
   useEffect(() => {
@@ -573,42 +851,48 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     return () => controller.abort();
   }, [selectedServiceIds, paymentMethod, status]);
 
-  async function saveAttendance(event: React.FormEvent) {
+  async function saveAttendance(event: React.FormEvent, draft?: AttendanceDraft) {
+    const values = draft ?? { clientName, serviceIds: selectedServiceIds, paymentMethod, status };
+    const attendanceId = editingId ?? attendanceToEdit?.id;
     event.preventDefault(); setSaving(true); setError(''); setFieldErrors({});
     if (dailyClosure && !dailyClosure.reopenedAt && selectedDate === todayInArgentina()) {
       setSaving(false);
       return setError('El día ya fue cerrado por NANI. No se pueden registrar nuevas atenciones.');
     }
     try {
-      const response = await fetch(`${API}/attendances${editingId ? `/${editingId}` : ''}`, {
-        method: editingId ? 'PATCH' : 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ clientName, serviceIds: selectedServiceIds, paymentMethod, status })
+      const response = await fetch(`${API}/attendances${attendanceId ? `/${attendanceId}` : ''}`, {
+        method: attendanceId ? 'PATCH' : 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(values)
       });
       const data = await response.json();
       if (!response.ok) {
         setFieldErrors(data.error?.fields ?? {});
         return setError(data.error?.message ?? 'No se pudo guardar la atención.');
       }
-      setAttendances((current) => editingId
-        ? current.map((attendance) => attendance.id === editingId ? data.attendance : attendance)
+      setAttendances((current) => attendanceId
+        ? current.map((attendance) => attendance.id === attendanceId ? data.attendance : attendance)
         : [data.attendance, ...current]);
       fetch(`${API}/admin/daily-summary?date=${encodeURIComponent(selectedDate)}`, { credentials: 'include' })
         .then((summaryResponse) => summaryResponse.ok ? summaryResponse.json() : null)
         .then((summaryData) => summaryData && setDailySummary(summaryData))
         .catch(() => undefined);
       setClientName(''); setSelectedServiceIds([]); setPaymentMethod('transfer'); setStatus('performed'); setEditingId(null);
+      setAttendanceToEdit(null);
+      setAttendanceEditDraft({ clientName: '', serviceIds: [], paymentMethod: 'transfer', status: 'performed' });
+      showSuccess(attendanceId ? 'Atención actualizada correctamente.' : 'Atención registrada correctamente.');
     } catch { setError('No se pudo conectar con la aplicación.'); }
     finally { setSaving(false); }
   }
 
   function editAttendance(attendance: Attendance) {
-    setEditingId(attendance.id);
-    setClientName(attendance.clientName);
-    setSelectedServiceIds(attendance.serviceIds?.length ? attendance.serviceIds : [attendance.serviceId]);
-    setPaymentMethod(attendance.paymentMethod);
-    setStatus(attendance.status);
+    setAttendanceEditDraft({
+      clientName: attendance.clientName,
+      serviceIds: attendance.serviceIds?.length ? attendance.serviceIds : [attendance.serviceId],
+      paymentMethod: attendance.paymentMethod,
+      status: attendance.status
+    });
     setError('');
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    setAttendanceToEdit(attendance);
   }
 
   function remainingWindow(createdAt: string) {
@@ -626,17 +910,20 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
   return <main className="home-shell"><header><div className="home-brand"><img src="/studio-by-nani-logo.png" alt="StudioByNani" /><div><p className="eyebrow">STUDIOBYNANI</p><h1>Hola, {user.displayName}</h1></div></div><button className="secondary" onClick={onLogout}>Cerrar sesión</button></header>
     <nav className={`menu-tabs ${isAdmin ? 'admin-menu' : 'employee-menu'}`} aria-label="Menú principal">
       <button className={adminTab === 'attendance' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('attendance')}>Atenciones</button>
+      <button className={adminTab === 'products' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('products')}>Productos</button>
+      <button className={adminTab === 'remittances' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('remittances')}>Entregas</button>
       {isAdmin && <><button className={adminTab === 'catalog' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('catalog')}>Servicios</button>
       <button className={adminTab === 'employees' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('employees')}>Equipo</button></>}
       {isAdmin && <button className={adminTab === 'expenses' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('expenses')}>Gastos</button>}
       {isAdmin && <button className={adminTab === 'reports' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('reports')}>Reportes</button>}
       {isAdmin && <button className={adminTab === 'activity' ? 'tab-active' : 'secondary'} onClick={() => setAdminTab('activity')}>Actividad</button>}
     </nav>
+    {successMessage && <p className="success-message" role="status">{successMessage}</p>}
     {isAdmin && adminTab === 'attendance' && <DailyClosureControls date={selectedDate} closure={dailyClosure} saving={closureSaving} error={closureError} onConfirm={confirmDailyClosure} onReopen={reopenDailyClosure} />}
-    {adminTab === 'attendance' && (isAdmin ? <DailyRemittanceOverview date={selectedDate} summary={dailySummary} /> : <DailyRemittanceSelf summary={dailySummary} saving={remittanceSaving} onMark={markRemittance} />)}
+    {(adminTab === 'attendance' || (!isAdmin && adminTab === 'products')) && (isAdmin ? <DailyRemittanceOverview date={selectedDate} summary={dailySummary} saving={pendingRemittanceSaving} receiptSaving={receiptSaving} error={remittanceActionError} onMark={markPendingRemittance} onReceive={(date, employeeId) => setRemittanceReceipt(date, employeeId, 'receive')} onClear={(date, employeeId) => setRemittanceReceipt(date, employeeId, 'clear')} /> : <DailyRemittanceSelf summary={dailySummary} saving={remittanceSaving} onMark={markRemittance} />)}
     {isAdmin && adminTab === 'reports' && <MonthlyClosureControls report={report} saving={monthlyClosureSaving} onToggle={toggleMonthlyClosure} />}
-    {adminTab === 'attendance' && (isAdmin ? <PendingRemittanceNotice pending={pendingRemittances} saving={pendingRemittanceSaving} onMark={markPendingRemittance} /> : <PendingOwnRemittanceNotice pending={pendingRemittances} saving={pendingRemittanceSaving} onMark={markPendingRemittance} />)}
-    <div className={`page-content ${(!isAdmin || adminTab === 'attendance') ? 'attendance-page' : 'admin-page'}`}><>{adminTab === 'attendance' && <section className="day-summary" aria-labelledby="daily-summary-title"><div className="summary-heading"><div><h2 id="daily-summary-title">{isAdmin ? 'Resumen del día' : 'Mi resumen del día'}</h2><p className="muted">{isAdmin ? 'Atenciones y dinero a entregar a NANI del día seleccionado.' : 'Tu facturación y el importe a entregar a NANI del día seleccionado.'}</p></div><div className="date-filter global-date-filter"><label htmlFor="summary-date">Fecha</label><input id="summary-date" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} /><button type="button" className="secondary" onClick={() => setSelectedDate(todayInArgentina())}>Hoy</button>{summaryLoading && <span className="summary-loading">Cargando…</span>}</div></div>{summaryError ? <p className="error" role="alert">{summaryError}</p> : dailySummary && <><div className="summary-totals"><span><strong>{dailySummary.totals.attentions}</strong> atenciones</span><span><strong>{dailySummary.totals.performed}</strong> realizadas</span><span><strong>{formatAmount(dailySummary.totals.totalCents)}</strong> facturado</span><span><strong>{formatAmount(dailySummary.totals.amountToNaniCents)}</strong> para NANI</span></div>{isAdmin && <div className="summary-employees">{dailySummary.employees.length === 0 ? <p className="muted">No hay atenciones registradas para este día.</p> : dailySummary.employees.map((employee) => <div className="summary-employee" key={employee.employeeId}><strong>{employee.employeeName}</strong><span>{employee.attentions} atenciones · {formatAmount(employee.totalCents)}</span><b>Entregar: {formatAmount(employee.amountToNaniCents)}</b></div>)}</div>}{isAdmin && <details className="summary-attendances"><summary>Ver detalle de clientas ({dailySummary.attendances.length})</summary>{dailySummary.attendances.map((attendance) => <div className="summary-attendance" key={attendance.id}><div><strong>{attendance.clientName}</strong><span>{attendance.serviceName} · {attendance.employeeName}</span></div><div><b>{attendance.status === 'performed' ? formatAmount(attendance.finalAmountCents) : 'Sin cargo'}</b><span>{new Date(attendance.createdAt).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })} · {attendance.paymentMethod === 'cash' ? 'Efectivo' : 'Transferencia'}</span></div></div>)}</details>}</>}</section>}{(!isAdmin || adminTab === 'attendance') && <><section className="welcome"><h2>{editingId ? 'Editar atención' : isAdmin ? 'Nueva atención de NANI' : 'Nueva atención'}</h2><form onSubmit={saveAttendance} noValidate>
+    {(adminTab === 'attendance' || (!isAdmin && adminTab === 'products')) && (isAdmin ? <PendingRemittanceNotice pending={pendingRemittances} saving={pendingRemittanceSaving} onMark={markPendingRemittance} /> : <PendingOwnRemittanceNotice pending={pendingRemittances} saving={pendingRemittanceSaving} onMark={markPendingRemittance} />)}
+    <div className={`page-content ${adminTab === 'remittances' ? 'admin-page' : (!isAdmin || adminTab === 'attendance') ? 'attendance-page' : 'admin-page'}`}><>{adminTab === 'attendance' && <section className="day-summary" aria-labelledby="daily-summary-title"><div className="summary-heading"><div><h2 id="daily-summary-title">{isAdmin ? 'Resumen del día' : 'Mi resumen del día'}</h2><p className="muted">{isAdmin ? 'Atenciones, productos y dinero a entregar a NANI del día seleccionado.' : 'Tu facturación y lo que te queda del día seleccionado.'}</p></div><div className="date-filter global-date-filter"><label htmlFor="summary-date">Fecha</label><input id="summary-date" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} /><button type="button" className="secondary" onClick={() => setSelectedDate(todayInArgentina())}>Hoy</button>{summaryLoading && <span className="summary-loading">Cargando…</span>}</div></div>{summaryError ? <p className="error" role="alert">{summaryError}</p> : dailySummary && <><div className="summary-totals"><span><strong>{dailySummary.totals.performed}</strong> realizadas</span><span><strong>{formatAmount(dailySummary.totals.totalCents)}</strong> atenciones facturadas</span><span><strong>{formatAmount(isAdmin ? dailySummary.totals.amountToNaniCents - dailySummary.totals.productAmountToNaniCents : dailySummary.totals.totalCents - (dailySummary.totals.amountToNaniCents - dailySummary.totals.productAmountToNaniCents))}</strong> {isAdmin ? 'para NANI · atenciones' : 'me queda · atenciones'}</span><span><strong>{dailySummary.totals.productQuantity}</strong> productos vendidos</span><span><strong>{formatAmount(dailySummary.totals.productTotalCents)}</strong> productos facturados</span><span><strong>{formatAmount(isAdmin ? dailySummary.totals.productAmountToNaniCents : dailySummary.totals.productTotalCents - dailySummary.totals.productAmountToNaniCents)}</strong> {isAdmin ? 'para NANI · productos' : 'me queda · productos'}</span>{!isAdmin && <span><strong>{formatAmount(dailySummary.totals.totalCents - (dailySummary.totals.amountToNaniCents - dailySummary.totals.productAmountToNaniCents) + dailySummary.totals.productTotalCents - dailySummary.totals.productAmountToNaniCents)}</strong> mi total del día</span>}</div>{isAdmin && <details className="summary-attendances"><summary>Ver detalle de clientas ({dailySummary.attendances.length})</summary>{dailySummary.attendances.map((attendance) => <div className="summary-attendance" key={attendance.id}><div><strong>{attendance.clientName}</strong><span>{attendance.serviceName} · {attendance.employeeName}</span></div><div><b>{attendance.status === 'performed' ? formatAmount(attendance.finalAmountCents) : 'Sin cargo'}</b><span>{formatDisplayTime(attendance.createdAt)} · {attendance.paymentMethod === 'cash' ? 'Efectivo' : 'Transferencia'}</span></div></div>)}</details>}</>}</section>}{adminTab !== 'remittances' && (!isAdmin || adminTab === 'attendance') && <><section className="welcome"><h2>{editingId ? 'Editar atención' : isAdmin ? 'Nueva atención de NANI' : 'Nueva atención'}</h2><form onSubmit={saveAttendance} noValidate>
         <label htmlFor="client-name">Clienta</label><input id="client-name" value={clientName} onChange={(event) => setClientName(event.target.value)} placeholder="Nombre completo" required aria-describedby={fieldErrors.clientName ? 'client-name-error' : undefined} aria-invalid={Boolean(fieldErrors.clientName)} />{fieldErrors.clientName && <p id="client-name-error" className="error" role="alert">{fieldErrors.clientName}</p>}
         <label>Servicios</label><details ref={servicePickerRef} className={`service-picker ${fieldErrors.serviceIds ? 'picker-invalid' : ''}`}><summary>{selectedServiceIds.length === 0 ? 'Seleccioná uno o varios servicios' : `${selectedServiceIds.length} servicio${selectedServiceIds.length === 1 ? '' : 's'} seleccionado${selectedServiceIds.length === 1 ? '' : 's'}`}</summary><div className="service-picker-options">{services.map((service) => <label key={service.id}><input type="checkbox" checked={selectedServiceIds.includes(service.id)} onChange={(event) => setSelectedServiceIds(event.target.checked ? [...selectedServiceIds, service.id] : selectedServiceIds.filter((id) => id !== service.id))} /><span>{service.name}<small>{formatAmount(service.baseAmountCents)}</small></span></label>)}</div></details>{selectedServiceIds.length > 0 && <div className="selected-services">{selectedServiceIds.map((id) => services.find((service) => service.id === id)).filter((service): service is Service => Boolean(service)).map((service) => <span key={service.id}>{service.name}<button type="button" aria-label={`Quitar ${service.name}`} onClick={() => setSelectedServiceIds((current) => current.filter((selectedId) => selectedId !== service.id))}>×</button></span>)}</div>}{fieldErrors.serviceIds && <p id="service-error" className="error" role="alert">{fieldErrors.serviceIds}</p>}
         <label htmlFor="payment">Medio de pago</label><select id="payment" value={paymentMethod} onChange={(event) => setPaymentMethod(event.target.value as 'cash' | 'transfer')} aria-describedby={fieldErrors.paymentMethod ? 'payment-error' : undefined} aria-invalid={Boolean(fieldErrors.paymentMethod)}><option value="transfer">Transferencia</option><option value="cash">Efectivo</option></select>
@@ -650,7 +937,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
             <span>Descuento <strong>{formatAmount(quote.discountCents)}</strong></span>
             <span>Precio final <strong>{formatAmount(quote.finalAmountCents)}</strong></span>
             <span>Comisión <strong>{formatAmount(quote.commissionCents)}</strong></span>
-            <span>Entregar a NANI <strong>{formatAmount(quote.amountToNaniCents)}</strong></span>
+            {user.id !== 'nani' && quote.amountToNaniCents > 0 && <span>Entregar a NANI <strong>{formatAmount(quote.amountToNaniCents)}</strong></span>}
           </div>}
         </section>
         {error && <p className="error" role="alert">{error}</p>}<div className="home-actions"><button disabled={saving || !quote} type="submit">{saving ? 'Guardando…' : editingId ? 'Guardar cambios' : 'Guardar atención'}</button>{editingId && <button className="secondary" type="button" onClick={() => { setEditingId(null); setClientName(''); setSelectedServiceIds([]); setStatus('performed'); setError(''); }}>Cancelar edición</button>}</div>
@@ -659,22 +946,23 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
         const dayClosed = Boolean(dailyClosure && !dailyClosure.reopenedAt && businessDate(attendance.createdAt) === dailyClosure.businessDate);
         const editable = !dayClosed && now < new Date(attendance.createdAt).getTime() + 24 * 60 * 60 * 1000;
         const statusLabel = attendance.status === 'performed' ? 'Realizada' : attendance.status === 'cancelled' ? 'Cancelada' : 'Ausente';
-        return <article className={`attendance-card status-${attendance.status}`} key={attendance.id}><div className="attendance-summary"><strong>{attendance.clientName}</strong><span>{attendance.serviceName}</span><span className="status-label">Estado: <strong>{statusLabel}</strong></span></div><div className="attendance-financial">{attendance.status === 'performed' ? <><span>Base: {formatAmount(attendance.baseAmountCents)}</span><span className="attendance-amount">Total: {formatAmount(attendance.finalAmountCents)} · {attendance.paymentMethod === 'cash' ? 'Efectivo' : 'Transferencia'}</span><span className="attendance-nani">Entregar a NANI: {formatAmount(attendance.amountToNaniCents)}</span></> : <span className="attendance-amount">No es ingreso · importes $0</span>}</div><div className="attendance-meta"><time className="attendance-time" dateTime={attendance.createdAt}>{new Date(attendance.createdAt).toLocaleString('es-AR')}</time>{!dayClosed && <span>{remainingWindow(attendance.createdAt)}</span>}{editable && <button className="attendance-edit" type="button" onClick={() => editAttendance(attendance)}>Editar atención</button>}</div></article>;
+        return <article className={`attendance-card status-${attendance.status}`} key={attendance.id}><div className="attendance-summary"><strong>{attendance.clientName}</strong><span>{attendance.serviceName}</span><span className="status-label">Estado: <strong>{statusLabel}</strong></span></div><div className="attendance-financial">{attendance.status === 'performed' ? <><span>Base: {formatAmount(attendance.baseAmountCents)}</span><span className="attendance-amount">Total: {formatAmount(attendance.finalAmountCents)} · {attendance.paymentMethod === 'cash' ? 'Efectivo' : 'Transferencia'}</span>{user.id !== 'nani' && attendance.amountToNaniCents > 0 && <span className="attendance-nani">Entregar a NANI: {formatAmount(attendance.amountToNaniCents)}</span>}</> : <span className="attendance-amount">No es ingreso · importes $0</span>}</div><div className="attendance-meta"><time className="attendance-time" dateTime={attendance.createdAt}>{formatDisplayDateTime(attendance.createdAt)}</time>{!dayClosed && <span>{remainingWindow(attendance.createdAt)}</span>}{editable && <button className="attendance-edit" type="button" onClick={() => editAttendance(attendance)}>Editar atención</button>}</div></article>;
       })}</section></>}
       {isAdmin && adminTab === 'catalog' && <section className="catalog" aria-labelledby="catalog-title">
         <h2 id="catalog-title">Catálogo de servicios</h2>
         <p className="muted">Los cambios aplican a nuevas atenciones. Las atenciones guardadas conservan sus importes.</p>
-        <form onSubmit={saveCatalogService} noValidate>
-          <label htmlFor="catalog-name">Nombre</label><input id="catalog-name" value={catalogName} onChange={(event) => setCatalogName(event.target.value)} required />
-          <label htmlFor="catalog-category">Categoría</label><input id="catalog-category" value={catalogCategory} onChange={(event) => setCatalogCategory(event.target.value)} required placeholder="Ej. Cejas" />
-          <label htmlFor="catalog-price">Precio (pesos)</label><input id="catalog-price" inputMode="decimal" value={catalogPrice} onChange={(event) => setCatalogPrice(event.target.value)} required />
-          <label htmlFor="catalog-duration">Duración (minutos)</label><input id="catalog-duration" inputMode="numeric" value={catalogDuration} onChange={(event) => setCatalogDuration(event.target.value)} required />
+        {catalogEditingId && <div className="edit-mode-notice"><strong>Editando servicio</strong><span>Modificá los datos arriba y guardá los cambios.</span></div>}
+        <form onSubmit={saveCatalogService} className="service-create-form" noValidate>
+          <div><label htmlFor="catalog-name">Nombre</label><input id="catalog-name" value={catalogName} onChange={(event) => setCatalogName(event.target.value)} required /></div>
+          <div><label htmlFor="catalog-category">Categoría</label><input id="catalog-category" value={catalogCategory} onChange={(event) => setCatalogCategory(event.target.value)} required placeholder="Ej. Cejas" /></div>
+          <div><label htmlFor="catalog-price">Precio (pesos)</label><input id="catalog-price" inputMode="decimal" value={catalogPrice} onChange={(event) => setCatalogPrice(event.target.value)} required /></div>
+          <div><label htmlFor="catalog-duration">Duración (minutos)</label><input id="catalog-duration" inputMode="numeric" value={catalogDuration} onChange={(event) => setCatalogDuration(event.target.value)} required /></div>
           {catalogError && <p className="error" role="alert">{catalogError}</p>}
           <div className="home-actions"><button disabled={catalogSaving} type="submit">{catalogSaving ? 'Guardando…' : catalogEditingId ? 'Guardar cambios' : 'Crear servicio'}</button>{catalogEditingId && <button className="secondary" type="button" onClick={() => { setCatalogEditingId(null); setCatalogName(''); setCatalogCategory(''); setCatalogPrice(''); setCatalogDuration(''); }}>Cancelar</button>}</div>
         </form>
-        <div className="catalog-list">{catalog.map((service) => <article className={`catalog-card ${service.active ? '' : 'catalog-inactive'}`} key={service.id}>
+        <div className="catalog-list service-catalog-list">{catalog.map((service) => <article className={`catalog-card service-catalog-card ${service.active ? '' : 'catalog-inactive'}`} key={service.id}>
           <div><strong>{service.name}</strong><span>{service.category} · {formatAmount(service.baseAmountCents)} · {service.durationMinutes} min</span><span>{service.active ? 'Activo' : 'Inactivo'}</span></div>
-          <div className="catalog-actions"><button type="button" onClick={() => editCatalogService(service)}>Editar</button><button className="secondary" type="button" onClick={() => toggleCatalogService(service)}>{service.active ? 'Desactivar' : 'Activar'}</button></div>
+          <div className="catalog-actions"><button type="button" onClick={() => editCatalogService(service)}>Editar</button><button className="secondary" type="button" onClick={() => toggleCatalogService(service)}>{service.active ? 'Desactivar' : 'Activar'}</button><button className="danger-button" type="button" onClick={() => setServiceToDelete(service)}>Eliminar</button></div>
         </article>)}</div>
       </section>}
       {isAdmin && adminTab === 'employees' && <section className="catalog" aria-labelledby="assignments-title">
@@ -703,6 +991,11 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
         <h2 id="employees-title">Equipo</h2>
         <p className="muted">Activá o desactivá el acceso y actualizá el PIN de cada empleada. Los PIN nunca se muestran.</p>
         {employeeError && <p className="error" role="alert">{employeeError}</p>}
+        <form onSubmit={createEmployee} className="employee-create-form" noValidate>
+          <div><label htmlFor="new-employee-name">Nueva empleada</label><input id="new-employee-name" value={newEmployeeName} onChange={(event) => setNewEmployeeName(event.target.value)} placeholder="Nombre completo" required /></div>
+          <div><label htmlFor="new-employee-pin">PIN inicial</label><input id="new-employee-pin" inputMode="numeric" type="password" maxLength={4} value={newEmployeePin} onChange={(event) => setNewEmployeePin(event.target.value.replace(/\D/g, '').slice(0, 4))} placeholder="4 dígitos" required /></div>
+          <button disabled={employeeCreateSaving || !/^\d{4}$/.test(newEmployeePin)} type="submit">{employeeCreateSaving ? 'Guardando…' : 'Agregar empleada'}</button>
+        </form>
         <div className="catalog-list">
           {managedEmployees.map((employee) => <article className={`catalog-card ${employee.active ? '' : 'catalog-inactive'}`} key={employee.id}>
             <div><strong>{employee.displayName}</strong><span>{employee.active ? 'Activa' : 'Inactiva'}</span></div>
@@ -742,48 +1035,281 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
         {!auditLoading && !auditError && auditLogs.length === 0 && <p className="muted">Todavía no hay actividad registrada.</p>}
         <div className="catalog-list activity-list">{auditLogs.map((log) => <article className="catalog-card activity-card" key={log.id}>
           <div><strong>{auditActionLabel(log.action)}</strong><span>{log.actorName} · {log.entityType}{log.entityId ? ` · ${log.entityId}` : ''}</span></div>
-          <time dateTime={log.createdAt}>{new Date(log.createdAt).toLocaleString('es-AR')}</time>
+          <time dateTime={log.createdAt}>{formatDisplayDateTime(log.createdAt)}</time>
         </article>)}</div>
       </section>}
+      {adminTab === 'remittances' && <MonthRemittances isAdmin={isAdmin} month={remittanceMonth} rows={monthRemittances} error={monthRemittancesError || remittanceActionError} saving={pendingRemittanceSaving} receiptSaving={receiptSaving} onMonthChange={setRemittanceMonth} onMark={markPendingRemittance} onReceive={(date, employeeId) => setRemittanceReceipt(date, employeeId, 'receive')} onClear={(date, employeeId) => setRemittanceReceipt(date, employeeId, 'clear')} />}
+      {adminTab === 'products' && <section className={`catalog products-panel ${isAdmin ? 'admin-products-panel' : 'employee-products-panel'} product-${productTab}-mode`} aria-labelledby="products-title">
+        <div className="section-heading"><div><h2 id="products-title">Productos</h2><p className="muted">Registrá ventas y consultá el stock disponible.</p></div><nav className="product-subtabs" aria-label="Secciones de productos">
+          <button type="button" className={productTab === 'sales' ? 'tab-active' : 'secondary'} onClick={() => setProductTab('sales')}>Registrar venta</button>
+          {isAdmin && <button type="button" className={productTab === 'catalog' ? 'tab-active' : 'secondary'} onClick={() => setProductTab('catalog')}>Catálogo y reposiciones</button>}
+        </nav></div>
+        {productError && <p className="error" role="alert">{productError}</p>}
+        {productTab === 'sales' && <ProductSearchPicker products={products} search={productSearch} onSearch={setProductSearch} quantities={productQuantities} onQuantityChange={(productId, quantity) => setProductQuantities((current) => ({ ...current, [productId]: quantity }))} />}
+        {productTab === 'sales' && <div className="product-recent-column"><div className="product-date-filter"><label htmlFor="product-date">Ventas del día</label><input id="product-date" type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} /><button type="button" className="secondary" onClick={() => setSelectedDate(todayInArgentina())}>Hoy</button></div><h3>Ventas recientes</h3><div className="catalog-list">{productSales.length === 0 ? <p className="muted">Todavía no hay ventas de productos.</p> : productSales.map((sale) => <article className={`catalog-card product-sale-card ${sale.status === 'cancelled' ? 'product-sale-cancelled' : ''}`} key={sale.id}><div className="product-sale-info"><strong>{sale.clientName}</strong><span>{sale.status === 'cancelled' ? 'Venta cancelada' : sale.items.map((item) => `${item.productName} ×${item.quantity}`).join(' · ')}</span><small>{sale.sellerName} · {formatDisplayDateTime(sale.createdAt)}</small></div><div className="product-sale-financial">{sale.status === 'cancelled' ? <strong className="product-sale-cancelled-label">Cancelada</strong> : <><strong className="product-sale-total">{formatAmount(sale.totalCents)}</strong>{sale.amountToNaniCents > 0 && <span className="product-sale-remittance">Entregar a NANI: {formatAmount(sale.amountToNaniCents)}</span>}{sale.commonBoxCents > 0 && <span className="product-sale-destination">Destino: caja común</span>}<div className="product-sale-actions"><button type="button" className="secondary" onClick={() => editProductSale(sale)}>Editar</button><button type="button" className="danger-button" onClick={() => setSaleToCancel(sale)}>Cancelar venta</button></div></>}</div></article>)}</div></div>}
+        {isAdmin && <div className="product-admin-tools">
+          <form onSubmit={createProduct} className="product-create-form" noValidate>
+            <div><label htmlFor="new-product-name">Producto</label><input id="new-product-name" value={newProductName} onChange={(event) => setNewProductName(event.target.value)} placeholder="Ej. Crema facial" required /></div>
+            <div><label htmlFor="new-product-origin">Origen</label><select id="new-product-origin" value={newProductSupplierType} onChange={(event) => setNewProductSupplierType(event.target.value as 'once' | 'local')}><option value="local">Proveedor local</option><option value="once">Once</option></select></div>
+            <div><label htmlFor="new-product-supplier">Proveedor</label><input id="new-product-supplier" value={newProductSupplierName} onChange={(event) => setNewProductSupplierName(event.target.value)} placeholder="Nombre del proveedor" required /></div>
+            <div><label htmlFor="new-product-cost">Costo actual</label><input id="new-product-cost" inputMode="decimal" value={newProductCost} onChange={(event) => setNewProductCost(event.target.value)} required /></div>
+            <div><label htmlFor="new-product-price">Precio de venta</label><input id="new-product-price" inputMode="decimal" value={newProductPrice} onChange={(event) => setNewProductPrice(event.target.value)} required /></div>
+            <div className="home-actions"><button disabled={productSaving} type="submit">Crear producto</button></div>
+          </form>
+          <label className="product-inventory-search" htmlFor="restock-search">Buscar producto</label>
+          <input id="restock-search" type="search" value={restockSearch} onChange={(event) => setRestockSearch(event.target.value)} placeholder="Escribí el nombre del producto…" />
+          <div className="catalog-list product-inventory-list">{[...products].filter((product) => product.name.toLocaleLowerCase().includes(restockSearch.toLocaleLowerCase())).sort((first, second) => Number(first.stock <= 0) - Number(second.stock <= 0)).map((product) => <article className={`catalog-card product-inventory-row ${product.stock <= 0 ? 'product-out-of-stock' : ''}`} key={product.id}><div><strong>{product.name}</strong><span>{product.supplierType === 'once' ? 'Once' : 'Proveedor local'}</span></div><span className="product-inventory-stock">{product.stock > 0 ? `${product.stock} disponibles` : 'Sin stock'}</span><span className="product-inventory-price">{formatAmount(product.salePriceCents)}</span><div className="catalog-actions"><button className="secondary" type="button" onClick={() => { setRestockId(product.id); setRestockQuantity(''); setRestockCost(String(product.currentCostCents / 100)); setRestockSalePrice(String(product.salePriceCents / 100)); }}>Reponer</button><button className="danger-button" type="button" onClick={() => setProductToDelete(product)}>Eliminar</button></div>{restockId === product.id && <form onSubmit={restockProduct} className="inline-form"><div><label htmlFor={`restock-quantity-${product.id}`}>Cantidad a ingresar</label><input id={`restock-quantity-${product.id}`} type="number" min="1" step="1" value={restockQuantity} onChange={(event) => setRestockQuantity(event.target.value)} required /></div><div><label htmlFor={`restock-cost-${product.id}`}>Precio de compra</label><input id={`restock-cost-${product.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={restockCost} onChange={(event) => setRestockCost(event.target.value)} required /></div><div><label htmlFor={`restock-sale-price-${product.id}`}>Precio de venta</label><input id={`restock-sale-price-${product.id}`} type="number" min="0.01" step="0.01" inputMode="decimal" value={restockSalePrice} onChange={(event) => setRestockSalePrice(event.target.value)} required /></div><button disabled={productSaving} type="submit">Guardar compra</button></form>}</article>)}</div>
+        </div>}
+        <form onSubmit={saveProductSale} className="product-sale-form" noValidate>
+          <label htmlFor="product-client">Clienta</label><input id="product-client" value={productClientName} onChange={(event) => setProductClientName(event.target.value)} placeholder="Nombre completo" required />
+          <label htmlFor="product-payment">Medio de pago</label><select id="product-payment" value={productPaymentMethod} onChange={(event) => setProductPaymentMethod(event.target.value as 'cash' | 'transfer')}><option value="transfer">Transferencia</option><option value="cash">Efectivo</option></select>
+          <h3>Elegí los productos</h3>
+          <div className="product-grid">{products.filter((product) => product.active).sort((first, second) => Number(first.stock <= 0) - Number(second.stock <= 0)).map((product) => <label className={`product-option ${product.stock <= product.lowStockThreshold ? 'product-low-stock' : ''} ${product.stock <= 0 ? 'product-out-of-stock' : ''}`} aria-disabled={product.stock <= 0} key={product.id}>
+            <span><strong>{product.name}</strong><small>{formatAmount(product.salePriceCents)} · {product.stock > 0 ? `Stock: ${product.stock}` : 'Sin stock'}</small></span>
+            <input aria-label={`Cantidad de ${product.name}`} type="number" min="0" max={product.stock} value={productQuantities[product.id] ?? ''} onChange={(event) => setProductQuantities((current) => ({ ...current, [product.id]: Math.min(product.stock, Math.max(0, Number(event.target.value) || 0)) }))} disabled={product.stock <= 0} />
+          </label>)}</div>
+          <div className="home-actions"><button disabled={productSaving} type="submit">{productSaving ? 'Guardando…' : 'Registrar venta'}</button></div>
+        </form>
+      </section>}
+      {isAdmin && productToDelete && <ProductDeleteModal product={productToDelete} saving={productSaving} onCancel={() => setProductToDelete(null)} onConfirm={deleteProduct} />}
+      {saleToCancel && <SaleCancelModal sale={saleToCancel} saving={productSaving} onCancel={() => setSaleToCancel(null)} onConfirm={cancelProductSale} />}
+      {saleToEdit && <ProductSaleEditModal sale={saleToEdit} products={products} clientName={productClientName} paymentMethod={productPaymentMethod} quantities={productQuantities} saving={productSaving} onClientNameChange={setProductClientName} onPaymentMethodChange={setProductPaymentMethod} onQuantityChange={(productId, quantity) => setProductQuantities((current) => ({ ...current, [productId]: quantity }))} onCancel={() => { setSaleToEdit(null); setEditingProductSaleId(null); }} onSubmit={saveProductSale} />}
+      {attendanceToEdit && <AttendanceEditModal attendance={attendanceToEdit} services={services} clientName={attendanceEditDraft.clientName} selectedServiceIds={attendanceEditDraft.serviceIds} paymentMethod={attendanceEditDraft.paymentMethod} status={attendanceEditDraft.status} saving={saving} onClientNameChange={(value) => setAttendanceEditDraft((current) => ({ ...current, clientName: value }))} onServiceToggle={(serviceId, enabled) => setAttendanceEditDraft((current) => ({ ...current, serviceIds: enabled ? [...new Set([...current.serviceIds, serviceId])] : current.serviceIds.filter((id) => id !== serviceId) }))} onPaymentMethodChange={(value) => setAttendanceEditDraft((current) => ({ ...current, paymentMethod: value }))} onStatusChange={(value) => setAttendanceEditDraft((current) => ({ ...current, status: value }))} onCancel={() => { setAttendanceToEdit(null); setEditingId(null); }} onSubmit={(event) => saveAttendance(event, attendanceEditDraft)} />}
+      {isAdmin && serviceToDelete && <ServiceDeleteModal service={serviceToDelete} saving={catalogSaving} onCancel={() => setServiceToDelete(null)} onConfirm={deleteCatalogService} />}
     </></div>
   </main>;
 }
 
+function ProductSearchPicker({ products, search, onSearch, quantities, onQuantityChange }: {
+  products: Product[];
+  search: string;
+  onSearch: (value: string) => void;
+  quantities: Record<string, number>;
+  onQuantityChange: (productId: string, quantity: number) => void;
+}) {
+  const filtered = products.filter((product) => product.active && product.name.toLocaleLowerCase().includes(search.toLocaleLowerCase()))
+    .sort((first, second) => Number(first.stock <= 0) - Number(second.stock <= 0));
+  return <section className="product-search-picker" aria-label="Buscar productos">
+    <label htmlFor="product-search">Buscar producto</label>
+    <input id="product-search" type="search" value={search} onChange={(event) => onSearch(event.target.value)} placeholder="Escribí el nombre del producto…" />
+    <div className="product-search-results">
+      {filtered.length === 0 ? <p className="muted">No encontramos productos con esa búsqueda.</p> : filtered.map((product) => <label className={`product-option ${product.stock <= product.lowStockThreshold ? 'product-low-stock' : ''} ${product.stock <= 0 ? 'product-out-of-stock' : ''}`} aria-disabled={product.stock <= 0} key={product.id}>
+        <span><strong>{product.name}</strong><small>{formatAmount(product.salePriceCents)} · {product.stock > 0 ? `Stock: ${product.stock}` : 'Sin stock'}</small></span>
+        <input aria-label={`Cantidad de ${product.name}`} type="number" min="0" max={product.stock} value={quantities[product.id] ?? ''} onChange={(event) => onQuantityChange(product.id, Math.min(product.stock, Math.max(0, Number(event.target.value) || 0)))} disabled={product.stock <= 0} />
+      </label>)}
+    </div>
+  </section>;
+}
+
+function ProductDeleteModal({ product, saving, onCancel, onConfirm }: { product: Product; saving: boolean; onCancel: () => void; onConfirm: () => void }) {
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+    <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-product-title">
+      <p className="eyebrow">Eliminar producto</p>
+      <h2 id="delete-product-title">¿Querés quitar “{product.name}” del catálogo?</h2>
+      <p className="muted">{product.stock > 0 ? `Tiene ${product.stock} unidades registradas.` : 'No tiene stock disponible.'} El producto dejará de aparecer para nuevas ventas, pero se conservará su historial.</p>
+      <div className="modal-actions"><button className="secondary" type="button" onClick={onCancel} disabled={saving}>Cancelar</button><button className="danger-button" type="button" onClick={onConfirm} disabled={saving}>{saving ? 'Eliminando…' : 'Sí, eliminar'}</button></div>
+    </section>
+  </div>;
+}
+
+function ServiceDeleteModal({ service, saving, onCancel, onConfirm }: { service: Service; saving: boolean; onCancel: () => void; onConfirm: () => void }) {
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+    <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="delete-service-title">
+      <p className="eyebrow">Eliminar servicio</p>
+      <h2 id="delete-service-title">¿Querés quitar “{service.name}” del catálogo?</h2>
+      <p className="muted">Dejará de aparecer para nuevas atenciones, pero se conservará el historial de atenciones existentes.</p>
+      <div className="modal-actions"><button className="secondary" type="button" onClick={onCancel} disabled={saving}>Cancelar</button><button className="danger-button" type="button" onClick={onConfirm} disabled={saving}>{saving ? 'Eliminando…' : 'Sí, eliminar'}</button></div>
+    </section>
+  </div>;
+}
+
+function SaleCancelModal({ sale, saving, onCancel, onConfirm }: { sale: ProductSale; saving: boolean; onCancel: () => void; onConfirm: () => void }) {
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+    <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="cancel-sale-title">
+      <p className="eyebrow">Cancelar venta</p>
+      <h2 id="cancel-sale-title">¿Querés cancelar la venta de “{sale.clientName}”?</h2>
+      <p className="muted">Se devolverá el stock y se recalcularán los importes. Esta acción se puede hacer dentro de las 24 horas y antes del cierre.</p>
+      <div className="modal-actions"><button className="secondary" type="button" onClick={onCancel} disabled={saving}>Volver</button><button className="danger-button" type="button" onClick={onConfirm} disabled={saving}>{saving ? 'Cancelando…' : 'Sí, cancelar venta'}</button></div>
+    </section>
+  </div>;
+}
+
+function ProductSaleEditModal({ sale, products, clientName, paymentMethod, quantities, saving, onClientNameChange, onPaymentMethodChange, onQuantityChange, onCancel, onSubmit }: {
+  sale: ProductSale;
+  products: Product[];
+  clientName: string;
+  paymentMethod: 'cash' | 'transfer';
+  quantities: Record<string, number>;
+  saving: boolean;
+  onClientNameChange: (value: string) => void;
+  onPaymentMethodChange: (value: 'cash' | 'transfer') => void;
+  onQuantityChange: (productId: string, quantity: number) => void;
+  onCancel: () => void;
+  onSubmit: (event: React.FormEvent) => void;
+}) {
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+    <section className="confirm-modal product-edit-modal" role="dialog" aria-modal="true" aria-labelledby="edit-sale-title">
+      <p className="eyebrow">Editar venta</p>
+      <h2 id="edit-sale-title">Venta de {sale.clientName}</h2>
+      <form onSubmit={onSubmit} className="product-edit-form">
+        <label htmlFor="edit-sale-client">Clienta</label><input id="edit-sale-client" value={clientName} onChange={(event) => onClientNameChange(event.target.value)} required />
+        <label htmlFor="edit-sale-payment">Medio de pago</label><select id="edit-sale-payment" value={paymentMethod} onChange={(event) => onPaymentMethodChange(event.target.value as 'cash' | 'transfer')}><option value="transfer">Transferencia</option><option value="cash">Efectivo</option></select>
+        <fieldset><legend>Productos</legend>{products.filter((product) => product.active).map((product) => <label className="product-edit-option" key={product.id}><span>{product.name}<small>{formatAmount(product.salePriceCents)}</small></span><input aria-label={`Cantidad de ${product.name}`} type="number" min="0" value={quantities[product.id] ?? ''} onChange={(event) => onQuantityChange(product.id, Math.max(0, Number(event.target.value) || 0))} /></label>)}</fieldset>
+        <div className="modal-actions"><button className="secondary" type="button" onClick={onCancel} disabled={saving}>Cancelar</button><button type="submit" disabled={saving}>{saving ? 'Guardando…' : 'Guardar cambios'}</button></div>
+      </form>
+    </section>
+  </div>;
+}
+
+function AttendanceEditModal({ attendance, services, clientName, selectedServiceIds, paymentMethod, status, saving, onClientNameChange, onServiceToggle, onPaymentMethodChange, onStatusChange, onCancel, onSubmit }: {
+  attendance: Attendance;
+  services: Service[];
+  clientName: string;
+  selectedServiceIds: string[];
+  paymentMethod: Attendance['paymentMethod'];
+  status: Attendance['status'];
+  saving: boolean;
+  onClientNameChange: (value: string) => void;
+  onServiceToggle: (serviceId: string, enabled: boolean) => void;
+  onPaymentMethodChange: (value: Attendance['paymentMethod']) => void;
+  onStatusChange: (value: Attendance['status']) => void;
+  onCancel: () => void;
+  onSubmit: (event: React.FormEvent) => void;
+}) {
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+    <section className="confirm-modal attendance-edit-modal" role="dialog" aria-modal="true" aria-labelledby="edit-attendance-title">
+      <p className="eyebrow">Editar atención</p>
+      <h2 id="edit-attendance-title">Atención de {attendance.clientName}</h2>
+      <form onSubmit={onSubmit} className="product-edit-form">
+        <label htmlFor="edit-attendance-client">Clienta</label><input id="edit-attendance-client" value={clientName} onChange={(event) => onClientNameChange(event.target.value)} required />
+        <label>Servicios</label><details className="service-picker service-edit-picker"><summary>{selectedServiceIds.length === 0 ? 'Seleccioná uno o varios servicios' : `${selectedServiceIds.length} servicio${selectedServiceIds.length === 1 ? '' : 's'} seleccionado${selectedServiceIds.length === 1 ? '' : 's'}`}</summary><div className="service-picker-options">{services.map((service) => <label key={service.id}><input type="checkbox" checked={selectedServiceIds.includes(service.id)} onChange={(event) => onServiceToggle(service.id, event.target.checked)} /><span>{service.name}</span></label>)}</div></details>
+        <label htmlFor="edit-attendance-payment">Medio de pago</label><select id="edit-attendance-payment" value={paymentMethod} onChange={(event) => onPaymentMethodChange(event.target.value as Attendance['paymentMethod'])}><option value="transfer">Transferencia</option><option value="cash">Efectivo</option></select>
+        <label htmlFor="edit-attendance-status">Estado</label><select id="edit-attendance-status" value={status} onChange={(event) => onStatusChange(event.target.value as Attendance['status'])}><option value="performed">Realizada</option><option value="cancelled">Cancelada</option><option value="absent">Ausente</option></select>
+        <div className="modal-actions"><button className="secondary" type="button" onClick={onCancel} disabled={saving}>Cancelar</button><button type="submit" disabled={saving}>{saving ? 'Guardando…' : 'Guardar cambios'}</button></div>
+      </form>
+    </section>
+  </div>;
+}
+
+function ProductDailySummary({ summary }: { summary: DailySummary }) {
+  if (summary.productSales.length === 0) return null;
+  return <section className="product-daily-summary" aria-label="Ventas de productos del día">
+    <strong>Ventas de productos del día</strong>
+    <span>Atenciones: {formatAmount(summary.totals.totalCents)} · Productos: {formatAmount(summary.totals.productTotalCents)} · Total: {formatAmount(summary.totals.totalCents + summary.totals.productTotalCents)} · Caja común: {formatAmount(summary.totals.commonBoxCents)}</span>
+  </section>;
+}
+
 function PendingRemittanceNotice({ pending, saving, onMark }: { pending: PendingRemittance[]; saving: string | null; onMark: (date: string, employeeId: string) => void }) {
   if (pending.length === 0) return null;
-  return <section className="pending-remittance" aria-label="Entregas pendientes"><strong>Entregas pendientes de días anteriores</strong><div>{pending.map((item) => <span key={`${item.date}-${item.employeeId}`}><span>{item.employeeName} · {item.date}: {item.alreadySent ? `ya envió ${formatAmount(item.alreadySent)}, falta ${formatAmount(item.remainingCents)}` : `debe entregar ${formatAmount(item.amountCents)}`}</span><button type="button" className="secondary" onClick={() => onMark(item.date, item.employeeId)} disabled={saving === `${item.date}:${item.employeeId}`}>{saving === `${item.date}:${item.employeeId}` ? 'Guardando…' : 'Marcar enviado'}</button></span>)}</div></section>;
+  return <section className="pending-remittance" aria-label="Entregas pendientes"><strong>Entregas pendientes de días anteriores</strong><div>{pending.map((item) => <span key={`${item.date}-${item.employeeId}`}><span>{item.employeeName} · {formatDisplayDate(item.date)}: {item.alreadySent ? `ya envió ${formatAmount(item.alreadySent)}, falta ${formatAmount(item.remainingCents)}` : `debe entregar ${formatAmount(item.amountCents)}`}</span><button type="button" className="secondary" onClick={() => onMark(item.date, item.employeeId)} disabled={saving === `${item.date}:${item.employeeId}`}>{saving === `${item.date}:${item.employeeId}` ? 'Guardando…' : 'Marcar enviado'}</button></span>)}</div></section>;
 }
 
 function PendingOwnRemittanceNotice({ pending, saving, onMark }: { pending: PendingRemittance[]; saving: string | null; onMark: (date: string, employeeId: string) => void }) {
   if (pending.length === 0) return null;
-  return <section className="pending-remittance" aria-label="Mis entregas pendientes"><strong>Mis entregas pendientes de días anteriores</strong><div>{pending.map((item) => <span key={`${item.date}-${item.employeeId}`}><span>{item.date}: {item.alreadySent ? `ya enviaste ${formatAmount(item.alreadySent)}, falta ${formatAmount(item.remainingCents)}` : `falta enviar ${formatAmount(item.amountCents)}`}</span><button type="button" className="secondary" onClick={() => onMark(item.date, item.employeeId)} disabled={saving === `${item.date}:${item.employeeId}`}>{saving === `${item.date}:${item.employeeId}` ? 'Guardando…' : 'Marcar enviado'}</button></span>)}</div></section>;
+  return <section className="pending-remittance" aria-label="Mis entregas pendientes"><strong>Mis entregas pendientes de días anteriores</strong><div>{pending.map((item) => <span key={`${item.date}-${item.employeeId}`}><span>{formatDisplayDate(item.date)}: {item.alreadySent ? `ya enviaste ${formatAmount(item.alreadySent)}, falta ${formatAmount(item.remainingCents)}` : `falta enviar ${formatAmount(item.amountCents)}`}</span><button type="button" className="secondary" onClick={() => onMark(item.date, item.employeeId)} disabled={saving === `${item.date}:${item.employeeId}`}>{saving === `${item.date}:${item.employeeId}` ? 'Guardando…' : 'Marcar enviado'}</button></span>)}</div></section>;
 }
 
 function MonthlyClosureControls({ report, saving, onToggle }: { report: Report | null; saving: boolean; onToggle: () => void }) {
-  if (!report || report.from.slice(0, 7) !== report.to.slice(0, 7)) return null;
+  if (!report || formatDisplayMonth(report.from) !== report.to.slice(0, 7)) return null;
   const closed = Boolean(report.closure && !report.closure.reopenedAt);
-  return <section className={`closure-bar ${closed ? 'closure-closed' : ''}`} aria-label="Cierre mensual"><div><strong>{closed ? 'Mes cerrado' : 'Cierre mensual pendiente'}</strong><span>{closed ? `Confirmado el ${new Date(report.closure!.confirmedAt).toLocaleString('es-AR')}` : `Período: ${report.from.slice(0, 7)}.`}</span></div><button className={closed ? 'secondary' : ''} type="button" onClick={onToggle} disabled={saving}>{saving ? 'Guardando…' : closed ? 'Reabrir mes' : 'Confirmar cierre mensual'}</button></section>;
+  return <section className={`closure-bar ${closed ? 'closure-closed' : ''}`} aria-label="Cierre mensual"><div><strong>{closed ? 'Mes cerrado' : 'Cierre mensual pendiente'}</strong><span>{closed ? `Confirmado el ${formatDisplayDateTime(report.closure!.confirmedAt)}` : `Período: ${formatDisplayMonth(report.from)}.`}</span></div><button className={closed ? 'secondary' : ''} type="button" onClick={onToggle} disabled={saving}>{saving ? 'Guardando…' : closed ? 'Reabrir mes' : 'Confirmar cierre mensual'}</button></section>;
 }
 
-function DailyRemittanceOverview({ date, summary }: { date: string; summary: DailySummary | null }) {
+function DailyRemittanceOverview({ date, summary, saving, receiptSaving, error, onMark, onReceive, onClear }: {
+  date: string;
+  summary: DailySummary | null;
+  saving: string | null;
+  receiptSaving: string | null;
+  error: string;
+  onMark: (date: string, employeeId: string) => void;
+  onReceive: (date: string, employeeId: string) => void;
+  onClear: (date: string, employeeId: string) => void;
+}) {
   if (!summary) return null;
-  const labelDate = date === todayInArgentina() ? 'hoy' : new Date(`${date}T12:00:00-03:00`).toLocaleDateString('es-AR');
-  return <section className="remittance-bar" aria-label="Estado de entregas"><strong>Entregas a NANI {labelDate}</strong><div className="remittance-list">{summary.employees.filter((employee) => employee.employeeId !== 'nani').map((employee) => {
-    const remittance = summary.remittances.find((item) => item.employeeId === employee.employeeId);
-    const alreadySent = remittance?.amountCents ?? 0;
-    const remaining = Math.max(employee.amountToNaniCents - alreadySent, 0);
-    return <span key={employee.employeeId} className={remittance?.sentAt ? 'remittance-sent' : ''}>{employee.employeeName}: {remittance?.sentAt ? `Enviado ${formatAmount(alreadySent)}` : alreadySent ? `Ya envió ${formatAmount(alreadySent)} · Falta ${formatAmount(remaining)}` : `Pendiente · ${formatAmount(employee.amountToNaniCents)}`}</span>;
-  })}</div></section>;
+  const employees = summary.employees.filter((employee) => employee.employeeId !== 'nani' && employee.amountToNaniCents > 0);
+  if (employees.length === 0) return null;
+  const labelDate = date === todayInArgentina() ? 'hoy' : formatDisplayDate(date);
+  return <section className="remittance-bar" aria-label="Estado de entregas">
+    <div className="remittance-heading"><strong>Entregas a NANI</strong><span>{labelDate}</span></div>
+    {error && <p className="error" role="alert">{error}</p>}
+    <div className="remittance-list">{employees.map((employee) => {
+      const remittance = summary.remittances.find((item) => item.employeeId === employee.employeeId);
+      const alreadySent = remittance?.amountCents ?? 0;
+      const remaining = Math.max(employee.amountToNaniCents - alreadySent, 0);
+      const attendanceAmount = employee.amountToNaniCents - employee.productAmountToNaniCents;
+      const received = Boolean(remittance?.receivedAt);
+      const sent = Boolean(remittance?.sentAt);
+      const covers = sent && remaining === 0;
+      const key = `${date}:${employee.employeeId}`;
+      return <article key={employee.employeeId} className={`remittance-person-card ${received ? 'remittance-received' : covers ? 'remittance-sent' : 'remittance-pending'}`}>
+        <strong className="remittance-person-name">{employee.employeeName}</strong>
+        <div className="remittance-breakdown"><span>Atenciones <b>{formatAmount(attendanceAmount)}</b></span><span>Productos <b>{formatAmount(employee.productAmountToNaniCents)}</b></span></div>
+        <strong className="remittance-status">{received ? `Recibido ${formatAmount(alreadySent)}` : covers ? `Enviado ${formatAmount(alreadySent)}` : sent ? `Enviado ${formatAmount(alreadySent)} · Falta ${formatAmount(remaining)}` : alreadySent ? `Ya entregó ${formatAmount(alreadySent)} · Debe entregar ${formatAmount(remaining)}` : `Debe entregar ${formatAmount(employee.amountToNaniCents)}`}</strong>
+        {!received && !covers && <button type="button" className="secondary remittance-mark-button" onClick={() => onMark(date, employee.employeeId)} disabled={saving === key}>{saving === key ? 'Guardando…' : 'Marcar enviado'}</button>}
+        {covers && !received && <button type="button" className="remittance-mark-button" onClick={() => onReceive(date, employee.employeeId)} disabled={receiptSaving === key}>{receiptSaving === key ? 'Guardando…' : 'Recibido'}</button>}
+        {received && <button type="button" className="secondary remittance-mark-button" onClick={() => onClear(date, employee.employeeId)} disabled={receiptSaving === key}>{receiptSaving === key ? 'Guardando…' : 'Quitar recibido'}</button>}
+      </article>;
+    })}</div>
+  </section>;
 }
 
 function DailyRemittanceSelf({ summary, saving, onMark }: { summary: DailySummary | null; saving: boolean; onMark: () => void }) {
   if (!summary || summary.employees.length === 0) return null;
   const employee = summary.employees[0];
   const remittance = summary.remittances.find((item) => item.employeeId === employee.employeeId);
+  const received = Boolean(remittance?.receivedAt);
   const sent = Boolean(remittance?.sentAt);
   const alreadySent = remittance?.amountCents ?? 0;
   const remaining = Math.max(employee.amountToNaniCents - alreadySent, 0);
-  return <section className={`remittance-bar ${sent ? 'remittance-sent' : ''}`} aria-label="Mi entrega a NANI"><div><strong>{sent ? `Enviado: ${formatAmount(alreadySent)}` : alreadySent ? `Ya enviado: ${formatAmount(alreadySent)} · Falta: ${formatAmount(remaining)}` : `Entrega a NANI: ${formatAmount(employee.amountToNaniCents)}`}</strong><span>{sent ? 'La entrega está registrada.' : alreadySent ? 'Hay nuevas atenciones pendientes de entregar.' : 'Todavía no está marcada como enviada.'}</span></div>{!sent && <button type="button" onClick={onMark} disabled={saving}>{saving ? 'Guardando…' : 'Marcar dinero enviado'}</button>}</section>;
+  const covers = sent && remaining === 0;
+  const attendanceAmount = employee.amountToNaniCents - employee.productAmountToNaniCents;
+  return <section className={`remittance-bar ${received ? 'remittance-received' : covers ? 'remittance-sent' : ''}`} aria-label="Mi entrega a NANI">
+    <div className="remittance-content">
+      <div className="remittance-heading"><strong>Mi entrega a NANI</strong><span>{summary.date === todayInArgentina() ? 'hoy' : formatDisplayDate(summary.date)}</span></div>
+      <strong>{received ? `Recibido: ${formatAmount(alreadySent)}` : covers ? `Enviado: ${formatAmount(alreadySent)}` : sent ? `Enviado: ${formatAmount(alreadySent)} · Falta: ${formatAmount(remaining)}` : alreadySent ? `Ya entregado: ${formatAmount(alreadySent)} · Debe entregar: ${formatAmount(remaining)}` : `Debe entregar: ${formatAmount(employee.amountToNaniCents)}`}</strong>
+      <span>Atenciones: {formatAmount(attendanceAmount)} · Productos: {formatAmount(employee.productAmountToNaniCents)}</span>
+      <span>{received ? 'NANI confirmó que recibió el dinero.' : covers ? 'Esperando que NANI confirme la recepción.' : alreadySent || sent ? 'Hay nuevas atenciones o ventas pendientes de entregar.' : 'Todavía no está marcada como enviada.'}</span>
+    </div>
+    {!received && !covers && <button type="button" onClick={onMark} disabled={saving}>{saving ? 'Guardando…' : 'Marcar dinero enviado'}</button>}
+  </section>;
+}
+
+function MonthRemittances({ isAdmin, month, rows, error, saving, receiptSaving, onMonthChange, onMark, onReceive, onClear }: {
+  isAdmin: boolean;
+  month: string;
+  rows: MonthRemittance[];
+  error: string;
+  saving: string | null;
+  receiptSaving: string | null;
+  onMonthChange: (month: string) => void;
+  onMark: (date: string, employeeId: string) => void;
+  onReceive: (date: string, employeeId: string) => void;
+  onClear: (date: string, employeeId: string) => void;
+}) {
+  return <section className="catalog" aria-labelledby="remittances-title">
+    <div className="section-heading">
+      <div><h2 id="remittances-title">Entregas</h2><p className="muted">{isAdmin ? 'Revisá lo pendiente, enviado y recibido del mes, sin cambiar la fecha una por una.' : 'Tus entregas del mes y si NANI ya confirmó la recepción.'}</p></div>
+      <div className="expense-month-filter"><label htmlFor="remittance-month">Mes</label><input id="remittance-month" type="month" value={month} onChange={(event) => onMonthChange(event.target.value)} /></div>
+    </div>
+    {error && <p className="error" role="alert">{error}</p>}
+    {rows.length === 0 ? <p className="muted">No hay entregas con deuda en este mes.</p> : <div className="remittance-bar"><div className="remittance-list">{rows.map((row) => {
+      const key = `${row.date}:${row.employeeId}`;
+      const short = row.status !== 'recibido' && row.sentAmountCents < row.amountCents;
+      const covers = row.status === 'enviado' && row.sentAmountCents >= row.amountCents;
+      const amount = row.status === 'pendiente' ? row.amountCents : row.sentAmountCents;
+      const label = row.status === 'pendiente' ? 'Pendiente' : row.status === 'enviado' ? 'Enviado' : 'Recibido';
+      return <article key={key} className={`remittance-person-card ${row.status === 'recibido' ? 'remittance-received' : covers ? 'remittance-sent' : 'remittance-pending'}`}>
+        <strong className="remittance-person-name">{row.employeeName}</strong>
+        <span>{formatDisplayDate(row.date)}</span>
+        <strong className="remittance-status">{label} {formatAmount(amount)}{row.status === 'enviado' && short ? ` · Falta ${formatAmount(row.amountCents - row.sentAmountCents)}` : ''}</strong>
+        {short && <button type="button" className="secondary remittance-mark-button" onClick={() => onMark(row.date, row.employeeId)} disabled={saving === key}>{saving === key ? 'Guardando…' : 'Marcar enviado'}</button>}
+        {isAdmin && covers && <button type="button" className="remittance-mark-button" onClick={() => onReceive(row.date, row.employeeId)} disabled={receiptSaving === key}>{receiptSaving === key ? 'Guardando…' : 'Recibido'}</button>}
+        {isAdmin && row.status === 'recibido' && <button type="button" className="secondary remittance-mark-button" onClick={() => onClear(row.date, row.employeeId)} disabled={receiptSaving === key}>{receiptSaving === key ? 'Guardando…' : 'Quitar recibido'}</button>}
+        {!isAdmin && covers && <span>Esperando que NANI confirme la recepción.</span>}
+        {!isAdmin && row.status === 'recibido' && <span>NANI confirmó que recibió el dinero.</span>}
+      </article>;
+    })}</div></div>}
+  </section>;
 }
 
 function DailyClosureControls({ date, closure, saving, error, onConfirm, onReopen }: {
@@ -796,7 +1322,7 @@ function DailyClosureControls({ date, closure, saving, error, onConfirm, onReope
 }) {
   const closed = Boolean(closure && !closure.reopenedAt);
   return <section className={`closure-bar ${closed ? 'closure-closed' : ''}`} aria-label="Cierre diario">
-    <div><strong>{closed ? 'Cierre confirmado' : 'Cierre diario pendiente'}</strong><span>{closed ? `Confirmado el ${new Date(closure!.confirmedAt).toLocaleString('es-AR')}` : `La fecha seleccionada es ${date}.`}</span></div>
+    <div><strong>{closed ? 'Cierre confirmado' : 'Cierre diario pendiente'}</strong><span>{closed ? `Confirmado el ${formatDisplayDateTime(closure!.confirmedAt)}` : `La fecha seleccionada es ${formatDisplayDate(date)}.`}</span></div>
     {error && <span className="error">{error}</span>}
     {closed ? <button className="secondary" type="button" onClick={onReopen} disabled={saving}>Reabrir cierre</button> : <button type="button" onClick={onConfirm} disabled={saving}>{saving ? 'Confirmando…' : 'Confirmar cierre'}</button>}
   </section>;

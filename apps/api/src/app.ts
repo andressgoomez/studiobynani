@@ -40,6 +40,16 @@ function validation(reply: FastifyReply, fields: Record<string, string>) {
   return reply.code(400).send({ error: { code: 'VALIDATION_ERROR', message: 'Revisá los datos ingresados.', fields } });
 }
 
+function presentRemittance(remittance: { employeeId: string; amountCents: number; sentAt: Date | null; receivedAt: Date | null; receivedById: string | null }) {
+  return {
+    employeeId: remittance.employeeId,
+    amountCents: remittance.amountCents,
+    sentAt: remittance.sentAt?.toISOString() ?? null,
+    receivedAt: remittance.receivedAt?.toISOString() ?? null,
+    receivedById: remittance.receivedById
+  };
+}
+
 function businessDate(date: Date) {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'America/Argentina/Buenos_Aires',
@@ -64,6 +74,22 @@ function storedServiceIds(attendance: { serviceId: string; serviceIdsJson: strin
   }
 }
 
+function productFinancials(supplierType: string, sellerId: string, totalCents: number, profitCents: number) {
+  if (supplierType === 'once') {
+    return {
+      employeeCommissionCents: 0,
+      amountToNaniCents: sellerId === 'nani' ? 0 : totalCents,
+      commonBoxCents: totalCents
+    };
+  }
+  const employeeCommissionCents = sellerId === 'nani' ? 0 : Math.floor(profitCents / 2);
+  return {
+    employeeCommissionCents,
+    amountToNaniCents: sellerId === 'nani' ? 0 : totalCents - employeeCommissionCents,
+    commonBoxCents: 0
+  };
+}
+
 async function requireSession(request: FastifyRequest, reply: FastifyReply): Promise<SessionUser | undefined> {
   const session = getSession(request);
   if (!session) {
@@ -85,6 +111,15 @@ export function buildApp(): FastifyInstance {
   app.register(cookie);
   const audit = (actorId: string, action: string, entityType: string, entityId?: string, details: Record<string, unknown> = {}) =>
     prisma.auditLog.create({ data: { id: randomUUID(), actorId, action, entityType, entityId, detailsJson: JSON.stringify(details) } });
+  const owedToNaniCents = async (employeeId: string, date: string) => {
+    const attendanceAmountCents = (await prisma.attendance.findMany({ where: { employeeId } }))
+      .filter((attendance) => businessDate(attendance.createdAt) === date && attendance.status === 'performed')
+      .reduce((total, attendance) => total + attendance.amountToNaniCents, 0);
+    const productAmountCents = (await prisma.productSale.findMany({ where: { sellerId: employeeId, status: 'completed' } }))
+      .filter((sale) => businessDate(sale.createdAt) === date)
+      .reduce((total, sale) => total + sale.amountToNaniCents, 0);
+    return attendanceAmountCents + productAmountCents;
+  };
   app.addHook('onReady', async () => {
     await prisma.$transaction(async (transaction) => {
       for (const user of DEFAULT_USERS) {
@@ -235,6 +270,16 @@ export function buildApp(): FastifyInstance {
     return { service: serviceResponse(updated) };
   });
 
+  app.delete<{ Params: { id: string } }>('/api/v1/admin/services/:id', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session || !can(session, 'admin:write')) return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'No tenés permisos para esta función.' } });
+    const existing = await prisma.service.findUnique({ where: { id: request.params.id } });
+    if (!existing) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Servicio no encontrado.' } });
+    const updated = await prisma.service.update({ where: { id: existing.id }, data: { active: false }, include: { employees: true } });
+    await audit(session.id, 'service.deleted', 'Service', existing.id, { name: existing.name });
+    return { service: serviceResponse(updated) };
+  });
+
   app.get('/api/v1/admin/service-assignments', async (request, reply) => {
     const session = await requireSession(request, reply);
     if (!session) return;
@@ -376,7 +421,7 @@ export function buildApp(): FastifyInstance {
     });
     await prisma.dailyRemittance.updateMany({
       where: { businessDate: businessDate(new Date(attendance.createdAt)), employeeId: session.id, sentAt: { not: null } },
-      data: { sentAt: null }
+      data: { sentAt: null, receivedAt: null, receivedById: null }
     });
     await audit(session.id, 'attendance.created', 'Attendance', attendance.id, { serviceIds, status });
     return reply.code(201).send({
@@ -421,6 +466,238 @@ export function buildApp(): FastifyInstance {
     };
   });
 
+  app.get('/api/v1/products', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    const products = await prisma.product.findMany({
+      where: session.role === 'ADMIN' ? undefined : { active: true },
+      include: { purchases: { select: { quantity: true } }, saleItems: { select: { quantity: true } } },
+      orderBy: [{ active: 'desc' }, { name: 'asc' }]
+    });
+    return {
+      products: products.map((product) => ({
+        id: product.id, name: product.name, category: product.category, supplierType: product.supplierType,
+        supplierName: product.supplierName, currentCostCents: product.currentCostCents, salePriceCents: product.salePriceCents,
+        lowStockThreshold: product.lowStockThreshold, active: product.active,
+        stock: product.purchases.reduce((sum, purchase) => sum + purchase.quantity, 0) - product.saleItems.reduce((sum, item) => sum + item.quantity, 0)
+      }))
+    };
+  });
+
+  app.post<{ Body: { name?: unknown; category?: unknown; supplierType?: unknown; supplierName?: unknown; currentCostCents?: unknown; salePriceCents?: unknown; lowStockThreshold?: unknown } }>('/api/v1/admin/products', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session || session.role !== 'ADMIN') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede administrar productos.' } });
+    const body = request.body ?? {};
+    const name = typeof body.name === 'string' ? body.name.trim() : '';
+    const category = typeof body.category === 'string' ? body.category.trim() : 'General';
+    const supplierType = body.supplierType === 'once' || body.supplierType === 'local' ? body.supplierType : '';
+    const supplierName = typeof body.supplierName === 'string' ? body.supplierName.trim() : '';
+    const currentCostCents = typeof body.currentCostCents === 'number' ? body.currentCostCents : 0;
+    const salePriceCents = typeof body.salePriceCents === 'number' ? body.salePriceCents : 0;
+    const lowStockThreshold = typeof body.lowStockThreshold === 'number' ? body.lowStockThreshold : 1;
+    const fields: Record<string, string> = {};
+    if (!name) fields.name = 'Ingresá un nombre.';
+    if (!supplierType) fields.supplierType = 'Elegí el origen.';
+    if (!supplierName) fields.supplierName = 'Ingresá el proveedor.';
+    if (!Number.isInteger(currentCostCents) || currentCostCents < 0) fields.currentCostCents = 'Ingresá un costo válido.';
+    if (!Number.isInteger(salePriceCents) || salePriceCents <= 0) fields.salePriceCents = 'Ingresá un precio válido.';
+    if (!Number.isInteger(lowStockThreshold) || lowStockThreshold < 0) fields.lowStockThreshold = 'Ingresá una alerta válida.';
+    if (Object.keys(fields).length) return validation(reply, fields);
+    const product = await prisma.product.create({ data: { id: randomUUID(), name, category, supplierType, supplierName, currentCostCents, salePriceCents, lowStockThreshold } });
+    await audit(session.id, 'product.created', 'Product', product.id, { name, supplierType });
+    return reply.code(201).send({ product: { ...product, stock: 0 } });
+  });
+
+  app.patch<{ Params: { id: string }; Body: { name?: unknown; category?: unknown; supplierType?: unknown; supplierName?: unknown; currentCostCents?: unknown; salePriceCents?: unknown; lowStockThreshold?: unknown; active?: unknown } }>('/api/v1/admin/products/:id', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session || session.role !== 'ADMIN') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede administrar productos.' } });
+    const existing = await prisma.product.findUnique({ where: { id: request.params.id } });
+    if (!existing) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Producto no encontrado.' } });
+    const body = request.body ?? {};
+    const data = {
+      ...(typeof body.name === 'string' ? { name: body.name.trim() } : {}),
+      ...(typeof body.category === 'string' ? { category: body.category.trim() } : {}),
+      ...(body.supplierType === 'once' || body.supplierType === 'local' ? { supplierType: body.supplierType } : {}),
+      ...(typeof body.supplierName === 'string' ? { supplierName: body.supplierName.trim() } : {}),
+      ...(typeof body.currentCostCents === 'number' && Number.isInteger(body.currentCostCents) && body.currentCostCents >= 0 ? { currentCostCents: body.currentCostCents } : {}),
+      ...(typeof body.salePriceCents === 'number' && Number.isInteger(body.salePriceCents) && body.salePriceCents > 0 ? { salePriceCents: body.salePriceCents } : {}),
+      ...(typeof body.lowStockThreshold === 'number' && Number.isInteger(body.lowStockThreshold) && body.lowStockThreshold >= 0 ? { lowStockThreshold: body.lowStockThreshold } : {}),
+      ...(typeof body.active === 'boolean' ? { active: body.active } : {})
+    };
+    const product = await prisma.product.update({ where: { id: existing.id }, data });
+    await audit(session.id, 'product.updated', 'Product', product.id, { changedFields: Object.keys(data) });
+    return { product };
+  });
+
+  app.delete<{ Params: { id: string } }>('/api/v1/admin/products/:id', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session || session.role !== 'ADMIN') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede administrar productos.' } });
+    const product = await prisma.product.findUnique({ where: { id: request.params.id }, include: { purchases: { select: { quantity: true } }, saleItems: { select: { quantity: true } } } });
+    if (!product) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Producto no encontrado.' } });
+    const stock = product.purchases.reduce((sum, purchase) => sum + purchase.quantity, 0) - product.saleItems.reduce((sum, item) => sum + item.quantity, 0);
+    const updated = await prisma.product.update({ where: { id: product.id }, data: { active: false } });
+    await audit(session.id, 'product.deleted', 'Product', product.id, { name: product.name, stock });
+    return { product: updated };
+  });
+
+  app.post<{ Params: { id: string }; Body: { quantity?: unknown; unitCostCents?: unknown; salePriceCents?: unknown; supplierName?: unknown; purchasedAt?: unknown } }>('/api/v1/admin/products/:id/purchases', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session || session.role !== 'ADMIN') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede registrar compras.' } });
+    const product = await prisma.product.findUnique({ where: { id: request.params.id } });
+    if (!product) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Producto no encontrado.' } });
+    const body = request.body ?? {};
+    const quantity = typeof body.quantity === 'number' ? body.quantity : 0;
+    const unitCostCents = typeof body.unitCostCents === 'number' ? body.unitCostCents : 0;
+    const salePriceCents = typeof body.salePriceCents === 'number' ? body.salePriceCents : 0;
+    const supplierName = typeof body.supplierName === 'string' ? body.supplierName.trim() : product.supplierName;
+    const purchasedAt = typeof body.purchasedAt === 'string' ? body.purchasedAt : businessDate(new Date());
+    if (!Number.isInteger(quantity) || quantity <= 0 || !Number.isInteger(unitCostCents) || unitCostCents < 0 || !Number.isInteger(salePriceCents) || salePriceCents <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(purchasedAt)) {
+      return validation(reply, { purchase: 'Revisá cantidad, precio de compra, precio de venta y fecha de compra.' });
+    }
+    if (await prisma.monthlyClosure.findFirst({ where: { month: purchasedAt.slice(0, 7), reopenedAt: null } })) {
+      return reply.code(409).send({ error: { code: 'MONTH_CLOSED', message: 'El cierre mensual ya fue confirmado por NANI.' } });
+    }
+    const purchase = await prisma.productPurchase.create({ data: { id: randomUUID(), productId: product.id, quantity, unitCostCents, supplierName, purchasedAt, createdById: session.id } });
+    await prisma.product.update({ where: { id: product.id }, data: { currentCostCents: unitCostCents, salePriceCents, supplierName } });
+    await audit(session.id, 'product.purchase_created', 'ProductPurchase', purchase.id, { productId: product.id, quantity, unitCostCents, salePriceCents });
+    return reply.code(201).send({ purchase });
+  });
+
+  app.get<{ Querystring: { date?: string } }>('/api/v1/product-sales/recent', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    const date = request.query.date;
+    const sales = await prisma.productSale.findMany({
+      where: {
+        ...(session.role === 'ADMIN' ? {} : { sellerId: session.id }),
+        ...(date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? { createdAt: { gte: new Date(`${date}T00:00:00-03:00`), lt: new Date(`${date}T23:59:59.999-03:00`) } } : {})
+      },
+      include: { seller: { select: { displayName: true } }, items: { include: { product: { select: { name: true } } } } },
+      orderBy: { createdAt: 'desc' }, take: 50
+    });
+    return { sales: sales.map((sale) => ({ ...sale, sellerName: sale.seller.displayName, createdAt: sale.createdAt.toISOString(), updatedAt: sale.updatedAt.toISOString(), items: sale.items.map((item) => ({ productId: item.productId, productName: item.product.name, quantity: item.quantity, lineTotalCents: item.lineTotalCents })) })) };
+  });
+
+  app.post<{ Body: { clientName?: unknown; paymentMethod?: unknown; items?: unknown } }>('/api/v1/product-sales', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    const saleDate = businessDate(new Date());
+    if (await prisma.dailyClosure.findFirst({ where: { businessDate: saleDate, reopenedAt: null } })) {
+      return reply.code(409).send({ error: { code: 'DAY_CLOSED', message: 'El cierre del día ya fue confirmado por NANI.' } });
+    }
+    if (await prisma.monthlyClosure.findFirst({ where: { month: saleDate.slice(0, 7), reopenedAt: null } })) {
+      return reply.code(409).send({ error: { code: 'MONTH_CLOSED', message: 'El cierre mensual ya fue confirmado por NANI.' } });
+    }
+    const body = request.body ?? {};
+    const clientName = typeof body.clientName === 'string' ? body.clientName.trim() : '';
+    const paymentMethod = body.paymentMethod === 'cash' || body.paymentMethod === 'transfer' ? body.paymentMethod : '';
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+    const itemInputs = rawItems.filter((item): item is { productId: string; quantity: number } => Boolean(item) && typeof item === 'object' && typeof (item as { productId?: unknown }).productId === 'string' && Number.isInteger((item as { quantity?: unknown }).quantity) && (item as { quantity: number }).quantity > 0);
+    if (!clientName || !paymentMethod || itemInputs.length === 0) return validation(reply, { sale: 'Ingresá clienta, medio de pago y al menos un producto.' });
+    const unique = new Map(itemInputs.map((item) => [item.productId, item.quantity]));
+    if (unique.size !== itemInputs.length) return validation(reply, { items: 'No repitas productos; modificá su cantidad.' });
+    try {
+      const sale = await prisma.$transaction(async (tx) => {
+        const products = await tx.product.findMany({ where: { id: { in: [...unique.keys()] }, active: true }, include: { purchases: { select: { quantity: true } }, saleItems: { select: { quantity: true } } } });
+        if (products.length !== unique.size) throw new Error('PRODUCT_NOT_FOUND');
+        const items = products.map((product) => {
+          const quantity = unique.get(product.id)!;
+          const stock = product.purchases.reduce((sum, purchase) => sum + purchase.quantity, 0) - product.saleItems.reduce((sum, item) => sum + item.quantity, 0);
+          if (stock < quantity) throw new Error(`INSUFFICIENT_STOCK:${product.name}`);
+          const lineTotalCents = product.salePriceCents * quantity;
+          const profitCents = (product.salePriceCents - product.currentCostCents) * quantity;
+          return { product, quantity, lineTotalCents, profitCents };
+        });
+        const totalCents = items.reduce((sum, item) => sum + item.lineTotalCents, 0);
+        const profitCents = items.reduce((sum, item) => sum + item.profitCents, 0);
+        const financials = items.reduce((sum, item) => {
+          const line = productFinancials(item.product.supplierType, session.id, item.lineTotalCents, item.profitCents);
+          return { employeeCommissionCents: sum.employeeCommissionCents + line.employeeCommissionCents, amountToNaniCents: sum.amountToNaniCents + line.amountToNaniCents, commonBoxCents: sum.commonBoxCents + line.commonBoxCents };
+        }, { employeeCommissionCents: 0, amountToNaniCents: 0, commonBoxCents: 0 });
+        return tx.productSale.create({ data: { id: randomUUID(), sellerId: session.id, clientName, paymentMethod, totalCents, profitCents, ...financials, items: { create: items.map((item) => ({ id: randomUUID(), productId: item.product.id, quantity: item.quantity, unitCostCents: item.product.currentCostCents, saleUnitPriceCents: item.product.salePriceCents, lineTotalCents: item.lineTotalCents, profitCents: item.profitCents })) } }, include: { items: true } });
+      });
+      await audit(session.id, 'product_sale.created', 'ProductSale', sale.id, { totalCents: sale.totalCents, itemCount: sale.items.length });
+      return reply.code(201).send({ sale });
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : '';
+      if (message.startsWith('INSUFFICIENT_STOCK:')) return reply.code(409).send({ error: { code: 'INSUFFICIENT_STOCK', message: `No hay stock suficiente de ${message.slice(18)}.` } });
+      if (message === 'PRODUCT_NOT_FOUND') return reply.code(400).send({ error: { code: 'VALIDATION_ERROR', message: 'Hay productos inválidos o inactivos.' } });
+      throw failure;
+    }
+  });
+
+  app.patch<{ Params: { id: string }; Body: { clientName?: unknown; paymentMethod?: unknown; items?: unknown } }>('/api/v1/product-sales/:id', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    const existing = await prisma.productSale.findUnique({ where: { id: request.params.id }, include: { items: true } });
+    if (!existing || (session.role !== 'ADMIN' && existing.sellerId !== session.id)) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Venta no encontrada.' } });
+    if (existing.status !== 'completed') return reply.code(409).send({ error: { code: 'SALE_CANCELLED', message: 'La venta ya fue cancelada.' } });
+    if (Date.now() > existing.createdAt.getTime() + ATTENDANCE_EDIT_WINDOW_MS) return reply.code(409).send({ error: { code: 'EDIT_WINDOW_EXPIRED', message: 'La ventana de edición terminó.' } });
+    const saleDate = businessDate(existing.createdAt);
+    if (await prisma.dailyClosure.findFirst({ where: { businessDate: saleDate, reopenedAt: null } }) || await prisma.monthlyClosure.findFirst({ where: { month: saleDate.slice(0, 7), reopenedAt: null } })) {
+      return reply.code(409).send({ error: { code: 'CLOSED_PERIOD', message: 'El período ya fue cerrado por NANI.' } });
+    }
+    const remittance = await prisma.dailyRemittance.findUnique({ where: { businessDate_employeeId: { businessDate: saleDate, employeeId: existing.sellerId } } });
+    if (remittance?.sentAt) return reply.code(409).send({ error: { code: 'REMITTANCE_SENT', message: 'No se puede modificar una venta después de enviar el dinero a NANI.' } });
+    const body = request.body ?? {};
+    const clientName = typeof body.clientName === 'string' ? body.clientName.trim() : existing.clientName;
+    const paymentMethod = body.paymentMethod === 'cash' || body.paymentMethod === 'transfer' ? body.paymentMethod : existing.paymentMethod;
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+    const itemInputs = rawItems.filter((item): item is { productId: string; quantity: number } => Boolean(item) && typeof item === 'object' && typeof (item as { productId?: unknown }).productId === 'string' && Number.isInteger((item as { quantity?: unknown }).quantity) && (item as { quantity: number }).quantity > 0);
+    if (!clientName || itemInputs.length === 0) return validation(reply, { sale: 'Ingresá clienta y al menos un producto.' });
+    const unique = new Map(itemInputs.map((item) => [item.productId, item.quantity]));
+    if (unique.size !== itemInputs.length) return validation(reply, { items: 'No repitas productos; modificá su cantidad.' });
+    const oldQuantities = new Map(existing.items.map((item) => [item.productId, item.quantity]));
+    try {
+      const sale = await prisma.$transaction(async (tx) => {
+        const products = await tx.product.findMany({ where: { id: { in: [...unique.keys()] }, active: true }, include: { purchases: { select: { quantity: true } }, saleItems: { select: { quantity: true } } } });
+        if (products.length !== unique.size) throw new Error('PRODUCT_NOT_FOUND');
+        const items = products.map((product) => {
+          const quantity = unique.get(product.id)!;
+          const stock = product.purchases.reduce((sum, purchase) => sum + purchase.quantity, 0) - product.saleItems.reduce((sum, item) => sum + item.quantity, 0) + (oldQuantities.get(product.id) ?? 0);
+          if (stock < quantity) throw new Error(`INSUFFICIENT_STOCK:${product.name}`);
+          return { product, quantity, lineTotalCents: product.salePriceCents * quantity, profitCents: (product.salePriceCents - product.currentCostCents) * quantity };
+        });
+        const totalCents = items.reduce((sum, item) => sum + item.lineTotalCents, 0);
+        const profitCents = items.reduce((sum, item) => sum + item.profitCents, 0);
+        const financials = items.reduce((sum, item) => {
+          const line = productFinancials(item.product.supplierType, existing.sellerId, item.lineTotalCents, item.profitCents);
+          return { employeeCommissionCents: sum.employeeCommissionCents + line.employeeCommissionCents, amountToNaniCents: sum.amountToNaniCents + line.amountToNaniCents, commonBoxCents: sum.commonBoxCents + line.commonBoxCents };
+        }, { employeeCommissionCents: 0, amountToNaniCents: 0, commonBoxCents: 0 });
+        await tx.productSaleItem.deleteMany({ where: { saleId: existing.id } });
+        return tx.productSale.update({ where: { id: existing.id }, data: { clientName, paymentMethod, totalCents, profitCents, ...financials, items: { create: items.map((item) => ({ id: randomUUID(), productId: item.product.id, quantity: item.quantity, unitCostCents: item.product.currentCostCents, saleUnitPriceCents: item.product.salePriceCents, lineTotalCents: item.lineTotalCents, profitCents: item.profitCents })) } }, include: { items: true } });
+      });
+      await audit(session.id, 'product_sale.updated', 'ProductSale', sale.id, { totalCents: sale.totalCents, itemCount: sale.items.length });
+      return { sale };
+    } catch (failure) {
+      const message = failure instanceof Error ? failure.message : '';
+      if (message.startsWith('INSUFFICIENT_STOCK:')) return reply.code(409).send({ error: { code: 'INSUFFICIENT_STOCK', message: `No hay stock suficiente de ${message.slice(18)}.` } });
+      if (message === 'PRODUCT_NOT_FOUND') return reply.code(400).send({ error: { code: 'VALIDATION_ERROR', message: 'Hay productos inválidos o inactivos.' } });
+      throw failure;
+    }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/v1/product-sales/:id/cancel', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    const existing = await prisma.productSale.findUnique({ where: { id: request.params.id }, include: { items: true } });
+    if (!existing || (session.role !== 'ADMIN' && existing.sellerId !== session.id)) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Venta no encontrada.' } });
+    if (existing.status !== 'completed') return reply.code(409).send({ error: { code: 'SALE_CANCELLED', message: 'La venta ya fue cancelada.' } });
+    if (Date.now() > existing.createdAt.getTime() + ATTENDANCE_EDIT_WINDOW_MS) return reply.code(409).send({ error: { code: 'EDIT_WINDOW_EXPIRED', message: 'La ventana de cancelación terminó.' } });
+    const saleDate = businessDate(existing.createdAt);
+    if (await prisma.dailyClosure.findFirst({ where: { businessDate: saleDate, reopenedAt: null } }) || await prisma.monthlyClosure.findFirst({ where: { month: saleDate.slice(0, 7), reopenedAt: null } })) {
+      return reply.code(409).send({ error: { code: 'CLOSED_PERIOD', message: 'El período ya fue cerrado por NANI.' } });
+    }
+    const remittance = await prisma.dailyRemittance.findUnique({ where: { businessDate_employeeId: { businessDate: saleDate, employeeId: existing.sellerId } } });
+    if (remittance?.sentAt) return reply.code(409).send({ error: { code: 'REMITTANCE_SENT', message: 'No se puede cancelar una venta después de enviar el dinero a NANI.' } });
+    const sale = await prisma.$transaction(async (tx) => {
+      await tx.productSaleItem.deleteMany({ where: { saleId: existing.id } });
+      return tx.productSale.update({ where: { id: existing.id }, data: { status: 'cancelled', totalCents: 0, profitCents: 0, employeeCommissionCents: 0, amountToNaniCents: 0, commonBoxCents: 0 }, include: { items: true } });
+    });
+    await audit(session.id, 'product_sale.cancelled', 'ProductSale', sale.id, { previousTotalCents: existing.totalCents });
+    return { sale };
+  });
+
   app.get<{ Querystring: { date?: string } }>('/api/v1/admin/daily-summary', async (request, reply) => {
     const session = await requireSession(request, reply);
     if (!session) return;
@@ -429,23 +706,27 @@ export function buildApp(): FastifyInstance {
     const daily = persisted.filter((attendance) =>
       businessDate(attendance.createdAt) === date && (session.role === 'ADMIN' || attendance.employeeId === session.id)
     );
+    const productSales = await prisma.productSale.findMany({
+      where: { status: 'completed', createdAt: { gte: new Date(`${date}T00:00:00-03:00`), lt: new Date(`${date}T23:59:59.999-03:00`) }, ...(session.role === 'ADMIN' ? {} : { sellerId: session.id }) },
+      include: { seller: true, items: { include: { product: true } } }
+    });
     const activeEmployees = session.role === 'ADMIN'
       ? await prisma.user.findMany({ where: { active: true }, orderBy: { displayName: 'asc' } })
       : await prisma.user.findMany({ where: { id: session.id } });
     const employees = new Map<string, {
       employeeId: string; employeeName: string; attentions: number; performed: number;
-      totalCents: number; commissionCents: number; amountToNaniCents: number; cashCents: number; transferCents: number;
+      totalCents: number; commissionCents: number; amountToNaniCents: number; cashCents: number; transferCents: number; productSales: number; productQuantity: number; productTotalCents: number; productAmountToNaniCents: number; commonBoxCents: number;
     }>();
     for (const employee of activeEmployees) {
       employees.set(employee.id, {
         employeeId: employee.id, employeeName: employee.displayName,
-        attentions: 0, performed: 0, totalCents: 0, commissionCents: 0, amountToNaniCents: 0, cashCents: 0, transferCents: 0
+        attentions: 0, performed: 0, totalCents: 0, commissionCents: 0, amountToNaniCents: 0, cashCents: 0, transferCents: 0, productSales: 0, productQuantity: 0, productTotalCents: 0, productAmountToNaniCents: 0, commonBoxCents: 0
       });
     }
     for (const attendance of daily) {
       const current = employees.get(attendance.employeeId) ?? {
         employeeId: attendance.employeeId, employeeName: attendance.employee.displayName,
-        attentions: 0, performed: 0, totalCents: 0, commissionCents: 0, amountToNaniCents: 0, cashCents: 0, transferCents: 0
+        attentions: 0, performed: 0, totalCents: 0, commissionCents: 0, amountToNaniCents: 0, cashCents: 0, transferCents: 0, productSales: 0, productQuantity: 0, productTotalCents: 0, productAmountToNaniCents: 0, commonBoxCents: 0
       };
       current.attentions += 1;
       if (attendance.status === 'performed') {
@@ -458,12 +739,30 @@ export function buildApp(): FastifyInstance {
       }
       employees.set(attendance.employeeId, current);
     }
+    for (const sale of productSales) {
+      const current = employees.get(sale.sellerId) ?? {
+        employeeId: sale.sellerId, employeeName: sale.seller.displayName,
+        attentions: 0, performed: 0, totalCents: 0, commissionCents: 0, amountToNaniCents: 0, cashCents: 0, transferCents: 0, productSales: 0, productQuantity: 0, productTotalCents: 0, productAmountToNaniCents: 0, commonBoxCents: 0
+      };
+      current.productSales += 1;
+      current.productQuantity += sale.items.reduce((total, item) => total + item.quantity, 0);
+      current.productTotalCents += sale.totalCents;
+      current.productAmountToNaniCents += sale.amountToNaniCents;
+      current.amountToNaniCents += sale.amountToNaniCents;
+      current.commonBoxCents += sale.commonBoxCents;
+      employees.set(sale.sellerId, current);
+    }
     const totals = [...employees.values()].reduce((sum, employee) => ({
       attentions: sum.attentions + employee.attentions,
       performed: sum.performed + employee.performed,
       totalCents: sum.totalCents + employee.totalCents,
-      amountToNaniCents: sum.amountToNaniCents + employee.amountToNaniCents
-    }), { attentions: 0, performed: 0, totalCents: 0, amountToNaniCents: 0 });
+      amountToNaniCents: sum.amountToNaniCents + employee.amountToNaniCents,
+      productSales: sum.productSales + employee.productSales,
+      productQuantity: sum.productQuantity + employee.productQuantity,
+      productTotalCents: sum.productTotalCents + employee.productTotalCents,
+      productAmountToNaniCents: sum.productAmountToNaniCents + employee.productAmountToNaniCents,
+      commonBoxCents: sum.commonBoxCents + employee.commonBoxCents
+    }), { attentions: 0, performed: 0, totalCents: 0, amountToNaniCents: 0, productSales: 0, productQuantity: 0, productTotalCents: 0, productAmountToNaniCents: 0, commonBoxCents: 0 });
     const remittances = await prisma.dailyRemittance.findMany({ where: { businessDate: date } });
     return {
       date,
@@ -472,7 +771,8 @@ export function buildApp(): FastifyInstance {
       remittances: remittances.map((remittance) => ({
         employeeId: remittance.employeeId,
         amountCents: remittance.amountCents,
-        sentAt: remittance.sentAt?.toISOString() ?? null
+        sentAt: remittance.sentAt?.toISOString() ?? null,
+        receivedAt: remittance.receivedAt?.toISOString() ?? null
       })),
       attendances: daily
         .sort((first, second) => second.createdAt.getTime() - first.createdAt.getTime())
@@ -487,7 +787,12 @@ export function buildApp(): FastifyInstance {
           commissionCents: attendance.commissionCents,
           amountToNaniCents: attendance.amountToNaniCents,
           createdAt: attendance.createdAt.toISOString()
-        }))
+        })),
+      productSales: productSales.map((sale) => ({
+        id: sale.id, sellerName: sale.seller.displayName, clientName: sale.clientName,
+        totalCents: sale.totalCents, amountToNaniCents: sale.amountToNaniCents, commonBoxCents: sale.commonBoxCents,
+        createdAt: sale.createdAt.toISOString(), items: sale.items.map((item) => `${item.product.name} ×${item.quantity}`)
+      }))
     };
   });
 
@@ -524,21 +829,60 @@ export function buildApp(): FastifyInstance {
     return { closure: { businessDate: updated.businessDate, confirmedAt: updated.confirmedAt.toISOString(), reopenedAt: updated.reopenedAt?.toISOString() ?? null } };
   });
 
+  app.get<{ Querystring: { month?: string } }>('/api/v1/daily-remittances', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    const month = request.query.month ?? '';
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return validation(reply, { month: 'El mes debe tener formato YYYY-MM.' });
+    const attendances = await prisma.attendance.findMany({ include: { employee: true } });
+    const sales = await prisma.productSale.findMany({ where: { status: 'completed' }, include: { seller: true } });
+    const remittances = await prisma.dailyRemittance.findMany({ where: { businessDate: { startsWith: month } } });
+    const remittanceMap = new Map(remittances.map((item) => [`${item.businessDate}:${item.employeeId}`, item]));
+    const grouped = new Map<string, { date: string; employeeId: string; employeeName: string; amountCents: number }>();
+    for (const attendance of attendances) {
+      const date = businessDate(attendance.createdAt);
+      if (!date.startsWith(`${month}-`) || attendance.employeeId === 'nani' || (session.role !== 'ADMIN' && attendance.employeeId !== session.id) || attendance.status !== 'performed' || attendance.amountToNaniCents <= 0) continue;
+      const key = `${date}:${attendance.employeeId}`;
+      const current = grouped.get(key) ?? { date, employeeId: attendance.employeeId, employeeName: attendance.employee.displayName, amountCents: 0 };
+      current.amountCents += attendance.amountToNaniCents;
+      grouped.set(key, current);
+    }
+    for (const sale of sales) {
+      const date = businessDate(sale.createdAt);
+      if (!date.startsWith(`${month}-`) || sale.sellerId === 'nani' || (session.role !== 'ADMIN' && sale.sellerId !== session.id) || sale.amountToNaniCents <= 0) continue;
+      const key = `${date}:${sale.sellerId}`;
+      const current = grouped.get(key) ?? { date, employeeId: sale.sellerId, employeeName: sale.seller.displayName, amountCents: 0 };
+      current.amountCents += sale.amountToNaniCents;
+      grouped.set(key, current);
+    }
+    const rows = [...grouped.values()].map((item) => {
+      const remittance = remittanceMap.get(`${item.date}:${item.employeeId}`);
+      const sentAt = remittance?.sentAt ?? null;
+      const receivedAt = remittance?.receivedAt ?? null;
+      return {
+        ...item,
+        sentAmountCents: remittance?.amountCents ?? 0,
+        sentAt: sentAt?.toISOString() ?? null,
+        receivedAt: receivedAt?.toISOString() ?? null,
+        status: receivedAt ? 'recibido' : sentAt ? 'enviado' : 'pendiente'
+      };
+    }).sort((first, second) => second.date.localeCompare(first.date) || first.employeeName.localeCompare(second.employeeName, 'es'));
+    return { month, remittances: rows };
+  });
+
   app.post<{ Params: { date: string } }>('/api/v1/daily-remittances/:date/mark-sent', async (request, reply) => {
     const session = await requireSession(request, reply);
     if (!session) return;
     if (session.role !== 'EMPLOYEE') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo las empleadas pueden marcar su entrega.' } });
     const date = request.params.date;
-    const amountCents = (await prisma.attendance.findMany({ where: { employeeId: session.id } }))
-      .filter((attendance) => businessDate(attendance.createdAt) === date && attendance.status === 'performed')
-      .reduce((total, attendance) => total + attendance.amountToNaniCents, 0);
+    const amountCents = await owedToNaniCents(session.id, date);
     const remittance = await prisma.dailyRemittance.upsert({
       where: { businessDate_employeeId: { businessDate: date, employeeId: session.id } },
-      update: { amountCents, sentAt: new Date() },
+      update: { amountCents, sentAt: new Date(), receivedAt: null, receivedById: null },
       create: { id: randomUUID(), businessDate: date, employeeId: session.id, amountCents, sentAt: new Date() }
     });
     await audit(session.id, 'remittance.marked_sent', 'DailyRemittance', `${date}:${session.id}`, { amountCents });
-    return { remittance: { employeeId: remittance.employeeId, amountCents: remittance.amountCents, sentAt: remittance.sentAt?.toISOString() ?? null } };
+    return { remittance: presentRemittance(remittance) };
   });
 
   app.get('/api/v1/admin/daily-remittances/pending', async (request, reply) => {
@@ -557,6 +901,15 @@ export function buildApp(): FastifyInstance {
       current.amountCents += attendance.amountToNaniCents;
       grouped.set(key, current);
     }
+    const productSales = await prisma.productSale.findMany({ where: { status: 'completed' }, include: { seller: true } });
+    for (const sale of productSales) {
+      const date = businessDate(sale.createdAt);
+      if (date >= today || sale.sellerId === 'nani' || (session.role !== 'ADMIN' && sale.sellerId !== session.id) || sale.amountToNaniCents <= 0) continue;
+      const key = `${date}:${sale.sellerId}`;
+      const current = grouped.get(key) ?? { date, employeeId: sale.sellerId, employeeName: sale.seller.displayName, amountCents: 0 };
+      current.amountCents += sale.amountToNaniCents;
+      grouped.set(key, current);
+    }
     const pending = [...grouped.values()].map((item) => {
       const remittance = remittanceMap.get(`${item.date}:${item.employeeId}`);
       const alreadySent = remittance?.amountCents ?? 0;
@@ -569,16 +922,46 @@ export function buildApp(): FastifyInstance {
     const session = await requireSession(request, reply);
     if (!session) return;
     if (session.role !== 'ADMIN') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede corregir una entrega.' } });
-    const amountCents = (await prisma.attendance.findMany({ where: { employeeId: request.params.employeeId } }))
-      .filter((attendance) => businessDate(attendance.createdAt) === request.params.date && attendance.status === 'performed')
-      .reduce((total, attendance) => total + attendance.amountToNaniCents, 0);
+    const amountCents = await owedToNaniCents(request.params.employeeId, request.params.date);
     const remittance = await prisma.dailyRemittance.upsert({
       where: { businessDate_employeeId: { businessDate: request.params.date, employeeId: request.params.employeeId } },
-      update: { amountCents, sentAt: new Date() },
+      update: { amountCents, sentAt: new Date(), receivedAt: null, receivedById: null },
       create: { id: randomUUID(), businessDate: request.params.date, employeeId: request.params.employeeId, amountCents, sentAt: new Date() }
     });
     await audit(session.id, 'remittance.marked_sent_by_admin', 'DailyRemittance', `${request.params.date}:${request.params.employeeId}`, { amountCents });
-    return { remittance: { employeeId: remittance.employeeId, amountCents: remittance.amountCents, sentAt: remittance.sentAt?.toISOString() ?? null } };
+    return { remittance: presentRemittance(remittance) };
+  });
+
+  app.post<{ Params: { date: string; employeeId: string } }>('/api/v1/admin/daily-remittances/:date/:employeeId/mark-received', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    if (session.role !== 'ADMIN') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede confirmar la recepción.' } });
+    const { date, employeeId } = request.params;
+    const remittance = await prisma.dailyRemittance.findUnique({ where: { businessDate_employeeId: { businessDate: date, employeeId } } });
+    if (!remittance?.sentAt) return reply.code(409).send({ error: { code: 'REMITTANCE_NOT_SENT', message: 'Solo se puede confirmar una entrega ya enviada.' } });
+    const owedCents = await owedToNaniCents(employeeId, date);
+    if (remittance.amountCents < owedCents) return reply.code(409).send({ error: { code: 'REMITTANCE_SHORTFALL', message: 'El monto enviado no cubre lo adeudado del día.' } });
+    const updated = await prisma.dailyRemittance.update({
+      where: { businessDate_employeeId: { businessDate: date, employeeId } },
+      data: { receivedAt: new Date(), receivedById: session.id }
+    });
+    await audit(session.id, 'remittance.marked_received', 'DailyRemittance', `${date}:${employeeId}`, { amountCents: updated.amountCents });
+    return { remittance: presentRemittance(updated) };
+  });
+
+  app.post<{ Params: { date: string; employeeId: string } }>('/api/v1/admin/daily-remittances/:date/:employeeId/clear-received', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    if (session.role !== 'ADMIN') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede quitar la confirmación.' } });
+    const { date, employeeId } = request.params;
+    const remittance = await prisma.dailyRemittance.findUnique({ where: { businessDate_employeeId: { businessDate: date, employeeId } } });
+    if (!remittance?.receivedAt) return reply.code(409).send({ error: { code: 'REMITTANCE_NOT_RECEIVED', message: 'Esa entrega no está marcada como recibida.' } });
+    const updated = await prisma.dailyRemittance.update({
+      where: { businessDate_employeeId: { businessDate: date, employeeId } },
+      data: { receivedAt: null, receivedById: null }
+    });
+    await audit(session.id, 'remittance.receipt_cleared', 'DailyRemittance', `${date}:${employeeId}`, { amountCents: updated.amountCents });
+    return { remittance: presentRemittance(updated) };
   });
 
   app.post<{ Params: { date: string; employeeId: string } }>('/api/v1/daily-remittances/:date/:employeeId/reset', async (request, reply) => {
@@ -803,7 +1186,7 @@ export function buildApp(): FastifyInstance {
     });
     await prisma.dailyRemittance.updateMany({
       where: { businessDate: businessDate(attendance.createdAt), employeeId: session.id, sentAt: { not: null } },
-      data: { sentAt: null }
+      data: { sentAt: null, receivedAt: null, receivedById: null }
     });
     await audit(session.id, 'attendance.updated', 'Attendance', updated.id, { serviceIds, status });
     return {
@@ -852,6 +1235,25 @@ export function buildApp(): FastifyInstance {
       orderBy: [{ active: 'desc' }, { displayName: 'asc' }]
     });
     return { employees };
+  });
+
+  app.post<{ Body: { displayName?: unknown; pin?: unknown } }>('/api/v1/admin/employees', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session || session.id !== 'nani' || !can(session, 'admin:write')) {
+      return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'No tenés permisos para esta función.' } });
+    }
+    const displayName = typeof request.body?.displayName === 'string' ? request.body.displayName.trim() : '';
+    const pin = typeof request.body?.pin === 'string' ? request.body.pin : '';
+    const fields: Record<string, string> = {};
+    if (displayName.length < 2) fields.displayName = 'Ingresá un nombre válido.';
+    if (!/^\d{4}$/.test(pin)) fields.pin = 'El PIN debe tener exactamente 4 dígitos.';
+    if (Object.keys(fields).length) return validation(reply, fields);
+    const employee = await prisma.user.create({
+      data: { id: randomUUID(), displayName, role: 'EMPLOYEE', active: true, pinHash: hashPin(pin) },
+      select: { id: true, displayName: true, role: true, active: true }
+    });
+    await audit(session.id, 'employee.created', 'User', employee.id, { displayName });
+    return reply.code(201).send({ employee });
   });
 
   app.patch<{ Params: { employeeId: string }; Body: UpdateEmployeeStatusRequest }>('/api/v1/admin/employees/:employeeId/status', async (request, reply) => {

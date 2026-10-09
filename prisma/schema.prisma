@@ -18,6 +18,7 @@ model User {
   sessions    Session[]
   attendances Attendance[]
   services    Service[] @relation("ServiceEmployees")
+  productSales ProductSale[]
 }
 
 model Session {
@@ -82,6 +83,8 @@ model DailyRemittance {
   employeeId  String
   amountCents Int
   sentAt      DateTime?
+  receivedAt  DateTime?
+  receivedById String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
@@ -125,5 +128,72 @@ model AuditLog {
 
   @@index([createdAt])
   @@index([actorId, createdAt])
+}
+
+model Product {
+  id                 String        @id
+  name               String
+  category           String        @default("General")
+  supplierType       String
+  supplierName       String
+  currentCostCents   Int
+  salePriceCents     Int
+  lowStockThreshold  Int           @default(1)
+  active             Boolean       @default(true)
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+  purchases          ProductPurchase[]
+  saleItems          ProductSaleItem[]
+
+  @@index([supplierType])
+  @@index([active])
+}
+
+model ProductPurchase {
+  id             String   @id
+  productId      String
+  quantity       Int
+  unitCostCents  Int
+  supplierName   String
+  purchasedAt    String
+  createdById    String
+  createdAt      DateTime @default(now())
+  product        Product  @relation(fields: [productId], references: [id])
+
+  @@index([productId, purchasedAt])
+}
+
+model ProductSale {
+  id                    String            @id
+  sellerId              String
+  clientName            String
+  paymentMethod         String
+  totalCents            Int
+  profitCents           Int
+  employeeCommissionCents Int
+  amountToNaniCents     Int
+  commonBoxCents        Int
+  status                String            @default("completed")
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  seller                User              @relation(fields: [sellerId], references: [id])
+  items                 ProductSaleItem[]
+
+  @@index([sellerId, createdAt])
+}
+
+model ProductSaleItem {
+  id                 String      @id
+  saleId             String
+  productId          String
+  quantity           Int
+  unitCostCents      Int
+  saleUnitPriceCents Int
+  lineTotalCents     Int
+  profitCents        Int
+  sale               ProductSale @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product            Product     @relation(fields: [productId], references: [id])
+
+  @@index([productId])
 }
 

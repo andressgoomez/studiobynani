@@ -47,3 +47,31 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-5-registrar-cancelaciones-y-ausencias.md`
   summary: Agregar una prueba explícita de expiración de sesión.
   evidence: No existe una regresión automatizada para expiresAt; corresponde al flujo de autenticación, no al registro de estados.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-rechequeo-entregas-nani.md`
+  summary: El cierre mensual compara y envía el mes como MM/YYYY.
+  evidence: `formatDisplayMonth` convierte YYYY-MM a MM/YYYY y eso se usa en el control y en el POST; el reemplazo ya estaba en los cambios de pantalla previos a este rechequeo, y el spec no modifica cierres.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-rechequeo-entregas-nani.md`
+  summary: Registrar una venta de producto no respeta una entrega ya enviada.
+  evidence: Editar y cancelar la venta devuelven 409 si hay `sentAt`; el alta no lo consulta. Es anterior al rechequeo.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-rechequeo-entregas-nani.md`
+  summary: Una empleada creada desde Equipo no aparece para iniciar sesión.
+  evidence: `GET /api/v1/auth/users` sigue devolviendo `ACTIVE_USERS` y no las filas de la base.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-rechequeo-entregas-nani.md`
+  summary: Una base nueva no puede aplicar las migraciones de productos ni de entregas.
+  evidence: Ninguna migración versionada crea `Product*` ni `DailyRemittance`; la de recibido solo agrega columnas sobre la tabla que ya existe en la base local.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-rechequeo-entregas-nani.md`
+  summary: El trabajo previo de productos y administración deja huecos de dinero, stock y formularios.
+  evidence: Reportes sin productos, cancelar una venta borra las líneas, editar reprecios al costo actual, el modal de edición puede guardar una venta nueva, los errores de edición no se ven en el diálogo, un producto desactivado reaparece, el PATCH de producto acepta datos inválidos, Once suma el mismo importe a NANI y a caja común, el resumen no reparte la venta en efectivo o transferencia, un precio bajo el costo deja comisión negativa, una cantidad no entera se descarta, la ventana de 24 horas no avisa, y un servicio o producto inactivo no se puede quitar en la edición. Nada de eso lo introduce la confirmación de recibido.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-rechequeo-entregas-nani.md`
+  summary: Actividad muestra claves crudas de productos y de empleadas.
+  evidence: El mapa de etiquetas no incluye esas acciones; las de recibido sí están. Viene del trabajo anterior.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-rechequeo-entregas-nani.md`
+  summary: El resumen del día de la empleada esconde importes y ya no lista el detalle por empleada.
+  evidence: El CSS oculta los spans 3 y 6 del resumen, y el markup del detalle por empleada salió en los cambios de pantalla previos.

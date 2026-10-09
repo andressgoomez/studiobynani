@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "npm run db:deploy && concurrently \"npm run dev --workspace @studiobynani/api\" \"npm run dev --workspace @studiobynani/web\"",
     "build": "npm run build --workspace @studiobynani/api && npm run build --workspace @studiobynani/web",
-    "test": "vitest run",
+    "test": "vitest run --no-file-parallelism",
     "db:generate": "prisma generate",
     "db:deploy": "prisma migrate deploy",
     "db:reset-demo": "tsx scripts/reset-demo-attendances.ts",
