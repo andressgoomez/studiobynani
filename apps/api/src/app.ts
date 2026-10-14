@@ -139,8 +139,7 @@ export function buildApp(): FastifyInstance {
             category: service.category,
             baseAmountCents: service.baseAmountCents,
             durationMinutes: service.durationMinutes,
-            active: service.active,
-            employees: { connect: service.enabledFor.map((id) => ({ id })) }
+            active: service.active
           }
         });
       }
@@ -285,7 +284,7 @@ export function buildApp(): FastifyInstance {
     if (!session) return;
     if (session.id !== 'nani' || !can(session, 'admin:read')) return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'No tenés permisos para esta función.' } });
     const [employees, persisted] = await Promise.all([
-      prisma.user.findMany({ where: { active: true, role: 'EMPLOYEE' }, include: { services: { select: { id: true } } }, orderBy: { displayName: 'asc' } }),
+      prisma.user.findMany({ where: { active: true, role: { in: ['EMPLOYEE', 'ADMIN'] } }, include: { services: { select: { id: true } } }, orderBy: { displayName: 'asc' } }),
       prisma.service.findMany({ include: { employees: { select: { id: true } } }, orderBy: [{ active: 'desc' }, { category: 'asc' }, { name: 'asc' }] })
     ]);
     return {
@@ -310,7 +309,7 @@ export function buildApp(): FastifyInstance {
     if (!Array.isArray(serviceIds) || serviceIds.some((serviceId) => typeof serviceId !== 'string')) {
       return validation(reply, { serviceIds: 'Indicá una lista válida de servicios.' });
     }
-    const employee = await prisma.user.findFirst({ where: { id: request.params.employeeId, active: true, role: 'EMPLOYEE' } });
+    const employee = await prisma.user.findFirst({ where: { id: request.params.employeeId, active: true, role: { in: ['EMPLOYEE', 'ADMIN'] } } });
     if (!employee) return reply.code(400).send({ error: { code: 'VALIDATION_ERROR', message: 'La empleada no es válida.' } });
     const uniqueServiceIds = [...new Set(serviceIds)];
     const services = await prisma.service.findMany({ where: { id: { in: uniqueServiceIds } }, select: { id: true } });

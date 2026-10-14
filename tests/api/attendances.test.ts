@@ -73,19 +73,48 @@ describe('atenciones', () => {
   });
 
   it('no descuenta maquillaje ni servicios de LEDIS en efectivo', async () => {
+    const { PrismaClient } = await import('@prisma/client');
+    const prisma = new PrismaClient();
     const nani = await authenticated('nani');
-    const makeup = await nani.app.inject({
-      method: 'POST', url: '/api/v1/attendances', headers: { cookie: nani.cookie },
-      payload: { clientName: 'Ana Pérez', serviceId: 'maquillaje-social', paymentMethod: 'cash' }
-    });
-    expect(makeup.json().attendance).toMatchObject({ discountCents: 0, finalAmountCents: 10000000, commissionCents: 10000000, amountToNaniCents: 0 });
+    const listed = await nani.app.inject({ method: 'GET', url: '/api/v1/admin/service-assignments', headers: { cookie: nani.cookie } });
+    const originalServiceIds = listed.json().assignments.find((assignment: { employeeId: string }) => assignment.employeeId === 'ledis').serviceIds;
+    const serviceId = 'limpieza-extracciones';
+    expect((await nani.app.inject({
+      method: 'PATCH', url: '/api/v1/admin/service-assignments/ledis', headers: { cookie: nani.cookie },
+      payload: { serviceIds: [...new Set([...originalServiceIds, serviceId])] }
+    })).statusCode).toBe(200);
 
-    const ledis = await authenticated('ledis');
-    const facial = await ledis.app.inject({
-      method: 'POST', url: '/api/v1/attendances', headers: { cookie: ledis.cookie },
-      payload: { clientName: 'Ana Pérez', serviceId: 'limpieza-extracciones', paymentMethod: 'cash' }
-    });
-    expect(facial.json().attendance).toMatchObject({ discountCents: 0, finalAmountCents: 3800000, commissionCents: 2660000, amountToNaniCents: 1140000 });
+    const createdAttendanceIds: string[] = [];
+    let restoreStatus = 0;
+    try {
+      await prisma.user.update({ where: { id: 'nani' }, data: { services: { connect: { id: 'maquillaje-social' } } } });
+      const makeup = await nani.app.inject({
+        method: 'POST', url: '/api/v1/attendances', headers: { cookie: nani.cookie },
+        payload: { clientName: 'Ana Pérez', serviceId: 'maquillaje-social', paymentMethod: 'cash' }
+      });
+      createdAttendanceIds.push(makeup.json().attendance.id);
+      expect(makeup.json().attendance).toMatchObject({ discountCents: 0, finalAmountCents: 10000000, commissionCents: 10000000, amountToNaniCents: 0 });
+
+      const ledis = await authenticated('ledis');
+      const facial = await ledis.app.inject({
+        method: 'POST', url: '/api/v1/attendances', headers: { cookie: ledis.cookie },
+        payload: { clientName: 'Ana Pérez', serviceId, paymentMethod: 'cash' }
+      });
+      createdAttendanceIds.push(facial.json().attendance.id);
+      expect(facial.json().attendance).toMatchObject({ discountCents: 0, finalAmountCents: 4000000, commissionCents: 2800000, amountToNaniCents: 1200000 });
+    } finally {
+      try {
+        restoreStatus = (await nani.app.inject({
+          method: 'PATCH', url: '/api/v1/admin/service-assignments/ledis', headers: { cookie: nani.cookie },
+          payload: { serviceIds: originalServiceIds }
+        })).statusCode;
+      } finally {
+        await prisma.user.update({ where: { id: 'nani' }, data: { services: { disconnect: { id: 'maquillaje-social' } } } });
+        if (createdAttendanceIds.length) await prisma.attendance.deleteMany({ where: { id: { in: createdAttendanceIds } } });
+        await prisma.$disconnect();
+      }
+      expect(restoreStatus).toBe(200);
+    }
   });
 
   it('registra canceladas y ausentes sin importes y rechaza estados inválidos', async () => {

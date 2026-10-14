@@ -38,54 +38,214 @@ export function isActiveUserId(value: string): value is UserId {
   return DEFAULT_USERS.some((user) => user.id === value && user.active);
 }
 
-const sharedServices = [
-  ['perfilado-cejas', 'Perfilado de cejas', 2200000, 30],
-  ['lash-lifting', 'Lash Lifting', 3500000, 60],
-  ['combo-ideal', 'Combo Ideal', 4600000, 90],
-  ['combo-perfecto-x3', 'Combo Perfecto x3', 5400000, 90],
-  ['combo-full-cejas', 'Combo Full Cejas', 3800000, 60],
-  ['combo-laminado-lifting', 'Combo laminado de cejas sin perfilado + lifting con tinte', 4300000, 60],
-  ['maquillaje-social', 'Maquillaje social', 10000000, 60],
-  ['maquillaje-perfilado', 'Maquillaje + perfilado de cejas', 12000000, 90],
-  ['clase-automaquillaje', 'Clase de automaquillaje', 7000000, 150],
-] as const;
-
-function categoryForService(id: string): string {
-  if (id.startsWith('limpieza-')) return 'Limpieza facial';
-  if (id.startsWith('peeling-')) return 'Peelings';
-  if (id.startsWith('dermapen-')) return 'Dermapen';
-  if (id === 'hydra-lips') return 'Labios';
-  if (id === 'recuperacion-capilar') return 'Capilar';
-  if (id === 'experiencia-skincare') return 'Experiencia';
-  if (id.startsWith('maquillaje-') || id === 'clase-automaquillaje') return 'Maquillaje';
-  if (id.startsWith('lash-')) return 'Pestañas';
-  if (id.startsWith('combo-')) return 'Combos';
-  return 'Cejas';
-}
-
-const ledisServices = [
-  ['limpieza-extracciones', 'Limpieza profunda + extracciones', 3800000, 75],
-  ['limpieza-masajes', 'Limpieza facial profunda + masajes faciales', 4000000, 75],
-  ['limpieza-dermaplaning', 'Limpieza facial + dermaplaning', 4500000, 80],
-  ['limpieza-drenaje', 'Limpieza facial + drenaje linfático', 4000000, 75],
-  ['peeling-enzimatico', 'Peeling enzimático', 4800000, 75],
-  ['peeling-quimico', 'Peeling químico', 4800000, 75],
-  ['dermapen-glow', 'Dermapen Glow con activos concentrados', 4900000, 90],
-  ['dermapen-premium', 'Dermapen Premium con exosomas', 5900000, 90],
-  ['hydra-lips', 'Hydra Lips con Dermapen', 3500000, 45],
-  ['recuperacion-capilar', 'Sesión recuperación capilar (Dermapen capilar)', 6500000, 90],
-  ['experiencia-skincare', 'Experiencia Skincare: educación cutánea y skincare', 4500000, 60],
-] as const;
-
 export const INITIAL_SERVICES: readonly Service[] = [
-  ...sharedServices.map(([id, name, baseAmountCents, durationMinutes]) => ({
-    id, name, category: categoryForService(id), baseAmountCents, durationMinutes, active: true,
-    enabledFor: ['nani', 'lula', 'lola'] as UserId[]
-  })),
-  ...ledisServices.map(([id, name, baseAmountCents, durationMinutes]) => ({
-    id, name, category: categoryForService(id), baseAmountCents, durationMinutes, active: true,
-    enabledFor: ['ledis'] as UserId[]
-  }))
+  {
+    id: 'perfilado-cejas',
+    name: 'Perfilado de cejas 🪄 (ef 10% off)',
+    category: 'Cejas, pestañas, makeup 💄🦋',
+    baseAmountCents: 2200000,
+    durationMinutes: 30,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'lash-lifting',
+    name: 'Lash Lifting 🙌🏽✨ (arqueado, nutrición, tinte) ( ef 10%eff)',
+    category: 'Cejas, pestañas, makeup 💄🦋',
+    baseAmountCents: 3500000,
+    durationMinutes: 60,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'combo-ideal',
+    name: 'Combo Ideal 🚀  (Perfilado de cejas + lash lifting) ( ef 10%off) c/tinte o s/tinte',
+    category: 'Cejas, pestañas, makeup 💄🦋',
+    baseAmountCents: 4600000,
+    durationMinutes: 90,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'combo-perfecto-x3',
+    name: 'Combo Perfecto x 3  ⚡️🚀⚡️( perfilado, laminado+ lash lifting c/ tinte o s/ tinte',
+    category: 'Cejas, pestañas, makeup 💄🦋',
+    baseAmountCents: 5400000,
+    durationMinutes: 90,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'combo-full-cejas',
+    name: 'COMBO FULL CEJAS⚡️     (perfilado + laminado y nutrición)',
+    category: 'Cejas, pestañas, makeup 💄🦋',
+    baseAmountCents: 3800000,
+    durationMinutes: 60,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'combo-laminado-lifting',
+    name: 'COMBO .      ( Laminado de cejas sin perfilado + Lifting con tinte',
+    category: 'Cejas, pestañas, makeup 💄🦋',
+    baseAmountCents: 4300000,
+    durationMinutes: 60,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'maquillaje-social',
+    name: 'Maquillaje social',
+    category: 'Cejas, pestañas, makeup 💄🦋',
+    baseAmountCents: 10000000,
+    durationMinutes: 90,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'maquillaje-perfilado',
+    name: 'Maquillaje + Perfilado de cejas',
+    category: 'Cejas, pestañas, makeup 💄🦋',
+    baseAmountCents: 12500000,
+    durationMinutes: 90,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'clase-automaquillaje',
+    name: 'Clase de automaquillaje',
+    category: 'Cejas, pestañas, makeup 💄🦋',
+    baseAmountCents: 7000000,
+    durationMinutes: 150,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'laminado-cejas',
+    name: 'Laminado de cejas. Off 10% efectivo',
+    category: 'Cejas, pestañas, makeup',
+    baseAmountCents: 2200000,
+    durationMinutes: 30,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'perfi-tinte',
+    name: 'PERFI + TINTE',
+    category: 'Cejas, pestañas, makeup',
+    baseAmountCents: 3000000,
+    durationMinutes: 45,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'prueba-maquillaje',
+    name: 'Prueba de maquillaje',
+    category: 'Cejas, pestañas, makeup',
+    baseAmountCents: 5000000,
+    durationMinutes: 60,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'limpieza-extracciones',
+    name: '​🧖🏻‍♀️​Limpieza Profunda + Extracciones: Para todo tipo de piel (ideal como mantenimiento mensual)',
+    category: 'Skin care 🧖🏻‍♀️',
+    baseAmountCents: 4000000,
+    durationMinutes: 75,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'limpieza-masajes',
+    name: '🧖🏻‍♀️Limpieza facial profunda + masajes faciales relax (ideal para esos momentos que quieras darte un mimo)',
+    category: 'Skin care 🧖🏻‍♀️',
+    baseAmountCents: 4500000,
+    durationMinutes: 75,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'limpieza-dermaplaning',
+    name: '​​🧖🏻‍♀️Limpieza facial  + dermaplaning (Elimina cèlulas muertas y vello facial)',
+    category: 'Skin care 🧖🏻‍♀️',
+    baseAmountCents: 4800000,
+    durationMinutes: 80,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'limpieza-drenaje',
+    name: '​🧖🏻‍♀️Limpieza facial + Drenaje Linfático Facial: (Detox, desinflamación y efecto descanso).',
+    category: 'Skin care 🧖🏻‍♀️',
+    baseAmountCents: 4500000,
+    durationMinutes: 75,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'peeling-enzimatico',
+    name: '​🧖🏻‍♀️Peeling Enzimático: (Renovación cutánea y luminosidad).',
+    category: 'Skin care 🧖🏻‍♀️',
+    baseAmountCents: 4800000,
+    durationMinutes: 75,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'peeling-quimico',
+    name: '​🧖🏻‍♀️Peeling Químico (Renovación, textura, control de manchas y luminosidad).',
+    category: 'Skin care 🧖🏻‍♀️',
+    baseAmountCents: 4800000,
+    durationMinutes: 75,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'dermapen-glow',
+    name: '🧖🏻‍♀️Dermapen Glow con ACTIVOS CONCENTRADOS: (Nutrición, brillo y suavidad).',
+    category: 'Skin care 🧖🏻‍♀️',
+    baseAmountCents: 5500000,
+    durationMinutes: 90,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'dermapen-premium',
+    name: '​🧖🏻‍♀️Dermapen Premium con EXOSOMAS: (Regeneración celular avanzada de la piel y estimulaciòn de colàgeno )',
+    category: 'Skin care 🧖🏻‍♀️',
+    baseAmountCents: 6500000,
+    durationMinutes: 90,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'hydra-lips',
+    name: '💋Hydra Lips con Dermapen (labios hidratados y ligero volumen)',
+    category: 'Skin care 🧖🏻‍♀️',
+    baseAmountCents: 3800000,
+    durationMinutes: 45,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'recuperacion-capilar',
+    name: '🧖🏻‍♀️Sesión Recuperación Capilar (Dermapen Capilar): (Frena la caída y estimula el crecimiento).',
+    category: 'Skin care 🧖🏻‍♀️',
+    baseAmountCents: 6500000,
+    durationMinutes: 90,
+    active: true,
+    enabledFor: []
+  },
+  {
+    id: 'experiencia-skincare',
+    name: '🧖🏻‍♀️Experiencia skincare Educación cutánea y Skincare (ideal para recomenzar el cuidado)',
+    category: 'Skin care 🧖🏻‍♀️',
+    baseAmountCents: 4500000,
+    durationMinutes: 60,
+    active: true,
+    enabledFor: []
+  }
 ];
 
 const commissionRates: Record<UserId, number> = { nani: 100, lula: 70, lola: 60, ledis: 70 };
@@ -99,7 +259,7 @@ export function calculateAttendanceAmounts(
   if (status !== 'performed') {
     return { baseAmountCents: 0, discountCents: 0, finalAmountCents: 0, commissionCents: 0, amountToNaniCents: 0 };
   }
-  const isMakeup = service.id.startsWith('maquillaje-') || service.id === 'clase-automaquillaje';
+  const isMakeup = service.id.startsWith('maquillaje-') || service.id === 'clase-automaquillaje' || service.id === 'prueba-maquillaje';
   const hasCashDiscount = paymentMethod === 'cash' && employeeId !== 'ledis' && !isMakeup;
   const discountCents = hasCashDiscount ? Math.round(service.baseAmountCents * 0.1) : 0;
   const finalAmountCents = service.baseAmountCents - discountCents;

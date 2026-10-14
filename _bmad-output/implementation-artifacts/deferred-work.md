@@ -75,3 +75,15 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-rechequeo-entregas-nani.md`
   summary: El resumen del día de la empleada esconde importes y ya no lista el detalle por empleada.
   evidence: El CSS oculta los spans 3 y 6 del resumen, y el markup del detalle por empleada salió en los cambios de pantalla previos.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-inicio-base-datos-reales.md`
+  summary: El resto de la suite de API sigue asumiendo servicios ya habilitados y escribe en la base de la clienta.
+  evidence: Tras dejar las habilitaciones vacías, esas pruebas dependen de filas previas. El spec prohíbe correrlas contra `prisma/data/studiobynani.sqlite`; el arnés compartido ya existía.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-inicio-base-datos-reales.md`
+  summary: Cada arranque reescribe nombre y rol de las cuatro usuarias.
+  evidence: El upsert de `onReady` ya actualizaba `displayName` y `role` antes de este inicio.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-inicio-base-datos-reales.md`
+  summary: Un servicio nuevo creado por NANI queda habilitado para todas las usuarias activas.
+  evidence: `POST /api/v1/admin/services` conecta `DEFAULT_USERS` activos y este cambio no tocó esa línea.
