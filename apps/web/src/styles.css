@@ -76,3 +76,26 @@ body:has(.employee-menu) .summary-totals span:nth-child(3),body:has(.employee-me
 
 .remittance-bar .remittance-mark-button{justify-self:end;white-space:nowrap}
 @media(max-width:700px){.remittance-person-card{grid-template-columns:1fr;gap:5px}.remittance-bar .remittance-mark-button{justify-self:start}}
+@media(max-width:759px){
+  .home-shell{padding:16px 14px 28px}
+  .home-shell header{align-items:center;gap:10px}
+  .home-brand{gap:10px;min-width:0}
+  .home-brand img{width:48px;height:48px}
+  .home-brand h1{font-size:22px}
+  .home-shell header .secondary{flex:0 0 auto;min-height:44px;padding:0 12px;font-size:14px}
+  .menu-tabs{width:100%;max-width:none;display:flex;gap:8px;margin-top:16px;overflow-x:auto;padding:2px 2px 6px}
+  .menu-tabs button{flex:0 0 auto;min-width:auto;min-height:44px;padding:0 14px;font-size:15px;line-height:1.2;white-space:nowrap}
+  .page-content{margin-top:16px}
+  .welcome,.products-panel,.day-summary,.catalog{padding:16px}
+  .summary-totals{gap:10px}
+  .summary-totals span{padding:12px;font-size:14px;line-height:1.35}
+  .summary-totals strong{font-size:20px;margin-bottom:2px}
+  .product-subtabs{width:100%}
+  .product-subtabs button{flex:1 1 0;min-height:44px;padding:8px 10px;white-space:normal}
+  .activity-card{flex-direction:column;align-items:flex-start;gap:8px}
+  .activity-card span{overflow-wrap:anywhere}
+  .activity-card time{white-space:normal}
+  .assignment-option{padding:10px 0;font-size:15px}
+  .catalog-card{align-items:flex-start;flex-wrap:wrap}
+  .catalog-card>div:first-child{min-width:0;flex:1 1 180px}
+}
