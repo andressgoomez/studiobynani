@@ -395,4 +395,73 @@ describe('entregas', () => {
       await restoreRemittance(prisma, today, 'lula', lulaToday.remittance, lulaToday.auditIds, []);
     }
   });
+
+  it('una venta local posterior reabre la entrega y una de Once no', async () => {
+    const employee = await authenticated('lula');
+    const nani = await authenticated('nani');
+    const prisma = database();
+    const today = businessDate(new Date());
+    const previous = await rememberRemittance(prisma, today, 'lula');
+    const productIds: string[] = [];
+    const saleIds: string[] = [];
+    const createProduct = async (name: string, supplierType: 'local' | 'once') => {
+      const created = await nani.app.inject({
+        method: 'POST', url: '/api/v1/admin/products', headers: { cookie: nani.cookie },
+        payload: { name, supplierType, supplierName: 'Prueba entrega', currentCostCents: 4000, salePriceCents: 10000, lowStockThreshold: 1 }
+      });
+      expect(created.statusCode).toBe(201);
+      const productId = created.json().product.id as string;
+      productIds.push(productId);
+      const purchase = await nani.app.inject({
+        method: 'POST', url: `/api/v1/admin/products/${productId}/purchases`, headers: { cookie: nani.cookie },
+        payload: { quantity: 2, unitCostCents: 4000, salePriceCents: 10000, supplierName: 'Prueba entrega', purchasedAt: today }
+      });
+      expect(purchase.statusCode).toBe(201);
+      return productId;
+    };
+    const sell = async (productId: string) => {
+      const sale = await employee.app.inject({
+        method: 'POST', url: '/api/v1/product-sales', headers: { cookie: employee.cookie },
+        payload: { clientName: 'Clienta entrega', paymentMethod: 'transfer', items: [{ productId, quantity: 1 }] }
+      });
+      expect(sale.statusCode).toBe(201);
+      saleIds.push(sale.json().sale.id as string);
+      return sale.json().sale as { amountToNaniCents: number };
+    };
+    try {
+      const localId = await createProduct('Local reabre entrega', 'local');
+      expect((await employee.app.inject({ method: 'POST', url: `/api/v1/daily-remittances/${today}/mark-sent`, headers: { cookie: employee.cookie } })).statusCode).toBe(200);
+      expect((await nani.app.inject({ method: 'POST', url: `/api/v1/admin/daily-remittances/${today}/lula/mark-received`, headers: { cookie: nani.cookie } })).statusCode).toBe(200);
+      const localSale = await sell(localId);
+      expect(localSale.amountToNaniCents).toBeGreaterThan(0);
+      const reopened = await prisma.dailyRemittance.findUniqueOrThrow({ where: { businessDate_employeeId: { businessDate: today, employeeId: 'lula' } } });
+      expect(reopened.sentAt).toBeNull();
+      expect(reopened.receivedAt).toBeNull();
+      expect(reopened.receivedById).toBeNull();
+      const resent = await employee.app.inject({ method: 'POST', url: `/api/v1/daily-remittances/${today}/mark-sent`, headers: { cookie: employee.cookie } });
+      expect(resent.statusCode).toBe(200);
+      expect(resent.json().remittance.amountCents).toBeGreaterThanOrEqual(localSale.amountToNaniCents);
+      expect((await nani.app.inject({ method: 'POST', url: `/api/v1/admin/daily-remittances/${today}/lula/mark-received`, headers: { cookie: nani.cookie } })).statusCode).toBe(200);
+      const onceId = await createProduct('Once no reabre entrega', 'once');
+      const onceSale = await sell(onceId);
+      expect(onceSale.amountToNaniCents).toBe(0);
+      const stillClosed = await prisma.dailyRemittance.findUniqueOrThrow({ where: { businessDate_employeeId: { businessDate: today, employeeId: 'lula' } } });
+      expect(stillClosed.sentAt).not.toBeNull();
+      expect(stillClosed.receivedAt).not.toBeNull();
+    } finally {
+      if (saleIds.length) {
+        await prisma.productSaleItem.deleteMany({ where: { saleId: { in: saleIds } } });
+        await prisma.productSale.deleteMany({ where: { id: { in: saleIds } } });
+        await prisma.auditLog.deleteMany({ where: { entityType: 'ProductSale', entityId: { in: saleIds } } });
+      }
+      if (productIds.length) {
+        const purchases = await prisma.productPurchase.findMany({ where: { productId: { in: productIds } }, select: { id: true } });
+        if (purchases.length) await prisma.auditLog.deleteMany({ where: { entityType: 'ProductPurchase', entityId: { in: purchases.map((purchase) => purchase.id) } } });
+        await prisma.productPurchase.deleteMany({ where: { productId: { in: productIds } } });
+        await prisma.product.deleteMany({ where: { id: { in: productIds } } });
+        await prisma.auditLog.deleteMany({ where: { entityType: 'Product', entityId: { in: productIds } } });
+      }
+      await restoreRemittance(prisma, today, 'lula', previous.remittance, previous.auditIds, []);
+    }
+  });
 });

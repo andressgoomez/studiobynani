@@ -34,6 +34,7 @@ describe('productos Once en la caja común', () => {
     const nani = await login('nani');
     const lula = await login('lula');
     const date = todayInArgentina();
+    const previousRemittance = await prisma.dailyRemittance.findUnique({ where: { businessDate_employeeId: { businessDate: date, employeeId: 'lula' } } });
     const createdProductIds: string[] = [];
     const createdPurchaseIds: string[] = [];
     const createdSaleIds: string[] = [];
@@ -93,6 +94,12 @@ describe('productos Once en la caja común', () => {
         await prisma.product.deleteMany({ where: { id: { in: createdProductIds } } });
         await prisma.auditLog.deleteMany({ where: { entityType: 'Product', entityId: { in: createdProductIds } } });
         if (createdPurchaseIds.length) await prisma.auditLog.deleteMany({ where: { entityType: 'ProductPurchase', entityId: { in: createdPurchaseIds } } });
+      }
+      if (previousRemittance) {
+        await prisma.dailyRemittance.update({
+          where: { businessDate_employeeId: { businessDate: date, employeeId: 'lula' } },
+          data: { amountCents: previousRemittance.amountCents, sentAt: previousRemittance.sentAt, receivedAt: previousRemittance.receivedAt, receivedById: previousRemittance.receivedById }
+        });
       }
     }
   });

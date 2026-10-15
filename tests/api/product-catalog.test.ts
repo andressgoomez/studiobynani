@@ -34,6 +34,7 @@ describe('catálogo de productos', () => {
     const nani = await login('nani');
     const lula = await login('lula');
     const date = todayInArgentina();
+    const previousRemittance = await prisma.dailyRemittance.findUnique({ where: { businessDate_employeeId: { businessDate: date, employeeId: 'lula' } } });
     const createdProductIds: string[] = [];
     const createdSaleIds: string[] = [];
     try {
@@ -119,6 +120,85 @@ describe('catálogo de productos', () => {
         await prisma.productPurchase.deleteMany({ where: { productId: { in: createdProductIds } } });
         await prisma.product.deleteMany({ where: { id: { in: createdProductIds } } });
         await prisma.auditLog.deleteMany({ where: { entityType: 'Product', entityId: { in: createdProductIds } } });
+      }
+      if (previousRemittance) {
+        await prisma.dailyRemittance.update({
+          where: { businessDate_employeeId: { businessDate: date, employeeId: 'lula' } },
+          data: { amountCents: previousRemittance.amountCents, sentAt: previousRemittance.sentAt, receivedAt: previousRemittance.receivedAt, receivedById: previousRemittance.receivedById }
+        });
+      }
+    }
+  });
+
+  it('devolver el stock al cancelar permite vender esa unidad de nuevo', async () => {
+    const app = buildApp();
+    apps.push(app);
+    await app.ready();
+    const prisma = new PrismaClient();
+    clients.push(prisma);
+    const login = async (userId: string) => {
+      const response = await app.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { userId, pin: '1234' } });
+      const header = Array.isArray(response.headers['set-cookie']) ? response.headers['set-cookie'][0] : response.headers['set-cookie'];
+      if (!header) throw new Error(`No se pudo iniciar sesión de ${userId}`);
+      return header.split(';')[0];
+    };
+    const nani = await login('nani');
+    const lula = await login('lula');
+    const date = todayInArgentina();
+    const previousRemittance = await prisma.dailyRemittance.findUnique({ where: { businessDate_employeeId: { businessDate: date, employeeId: 'lula' } } });
+    const createdProductIds: string[] = [];
+    const createdSaleIds: string[] = [];
+    try {
+      const created = await app.inject({
+        method: 'POST', url: '/api/v1/admin/products', headers: { cookie: nani },
+        payload: { name: 'Crema prueba cancelación', supplierType: 'local', supplierName: 'Proveedor prueba', currentCostCents: 2500, salePriceCents: 8000, lowStockThreshold: 1 }
+      });
+      expect(created.statusCode).toBe(201);
+      const productId = created.json().product.id as string;
+      createdProductIds.push(productId);
+      expect((await app.inject({
+        method: 'POST', url: `/api/v1/admin/products/${productId}/purchases`, headers: { cookie: nani },
+        payload: { quantity: 1, unitCostCents: 2500, salePriceCents: 8000, supplierName: 'Proveedor prueba', purchasedAt: date }
+      })).statusCode).toBe(201);
+      const sale = await app.inject({
+        method: 'POST', url: '/api/v1/product-sales', headers: { cookie: lula },
+        payload: { clientName: 'Clienta cancelación', paymentMethod: 'cash', items: [{ productId, quantity: 1 }] }
+      });
+      expect(sale.statusCode).toBe(201);
+      createdSaleIds.push(sale.json().sale.id as string);
+      expect((await app.inject({
+        method: 'POST', url: '/api/v1/product-sales', headers: { cookie: lula },
+        payload: { clientName: 'Clienta sin stock', paymentMethod: 'cash', items: [{ productId, quantity: 1 }] }
+      })).statusCode).toBe(409);
+      const cancelled = await app.inject({ method: 'POST', url: `/api/v1/product-sales/${sale.json().sale.id}/cancel`, headers: { cookie: nani } });
+      expect(cancelled.statusCode).toBe(200);
+      expect(cancelled.json().sale).toMatchObject({ status: 'cancelled', totalCents: 0, amountToNaniCents: 0, items: [] });
+      const listed = await app.inject({ method: 'GET', url: '/api/v1/products', headers: { cookie: nani } });
+      expect(listed.json().products.find((product: { id: string }) => product.id === productId).stock).toBe(1);
+      const resold = await app.inject({
+        method: 'POST', url: '/api/v1/product-sales', headers: { cookie: lula },
+        payload: { clientName: 'Clienta reventa', paymentMethod: 'cash', items: [{ productId, quantity: 1 }] }
+      });
+      expect(resold.statusCode).toBe(201);
+      createdSaleIds.push(resold.json().sale.id as string);
+    } finally {
+      if (createdSaleIds.length) {
+        await prisma.productSaleItem.deleteMany({ where: { saleId: { in: createdSaleIds } } });
+        await prisma.productSale.deleteMany({ where: { id: { in: createdSaleIds } } });
+        await prisma.auditLog.deleteMany({ where: { entityType: 'ProductSale', entityId: { in: createdSaleIds } } });
+      }
+      if (createdProductIds.length) {
+        const purchases = await prisma.productPurchase.findMany({ where: { productId: { in: createdProductIds } }, select: { id: true } });
+        if (purchases.length) await prisma.auditLog.deleteMany({ where: { entityType: 'ProductPurchase', entityId: { in: purchases.map((purchase) => purchase.id) } } });
+        await prisma.productPurchase.deleteMany({ where: { productId: { in: createdProductIds } } });
+        await prisma.product.deleteMany({ where: { id: { in: createdProductIds } } });
+        await prisma.auditLog.deleteMany({ where: { entityType: 'Product', entityId: { in: createdProductIds } } });
+      }
+      if (previousRemittance) {
+        await prisma.dailyRemittance.update({
+          where: { businessDate_employeeId: { businessDate: date, employeeId: 'lula' } },
+          data: { amountCents: previousRemittance.amountCents, sentAt: previousRemittance.sentAt, receivedAt: previousRemittance.receivedAt, receivedById: previousRemittance.receivedById }
+        });
       }
     }
   });

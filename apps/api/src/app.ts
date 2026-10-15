@@ -724,7 +724,14 @@ export function buildApp(): FastifyInstance {
           const line = productFinancials(item.product.supplierType, session.id, item.lineTotalCents, item.profitCents);
           return { employeeCommissionCents: sum.employeeCommissionCents + line.employeeCommissionCents, amountToNaniCents: sum.amountToNaniCents + line.amountToNaniCents, commonBoxCents: sum.commonBoxCents + line.commonBoxCents };
         }, { employeeCommissionCents: 0, amountToNaniCents: 0, commonBoxCents: 0 });
-        return tx.productSale.create({ data: { id: randomUUID(), sellerId: session.id, clientName, paymentMethod, totalCents, profitCents, ...financials, items: { create: items.map((item) => ({ id: randomUUID(), productId: item.product.id, quantity: item.quantity, unitCostCents: item.product.currentCostCents, saleUnitPriceCents: item.product.salePriceCents, lineTotalCents: item.lineTotalCents, profitCents: item.profitCents })) } }, include: { items: true } });
+        const created = await tx.productSale.create({ data: { id: randomUUID(), sellerId: session.id, clientName, paymentMethod, totalCents, profitCents, ...financials, items: { create: items.map((item) => ({ id: randomUUID(), productId: item.product.id, quantity: item.quantity, unitCostCents: item.product.currentCostCents, saleUnitPriceCents: item.product.salePriceCents, lineTotalCents: item.lineTotalCents, profitCents: item.profitCents })) } }, include: { items: true } });
+        if (session.id !== 'nani' && created.amountToNaniCents > 0) {
+          await tx.dailyRemittance.updateMany({
+            where: { businessDate: businessDate(created.createdAt), employeeId: session.id, sentAt: { not: null } },
+            data: { sentAt: null, receivedAt: null, receivedById: null }
+          });
+        }
+        return created;
       });
       await audit(session.id, 'product_sale.created', 'ProductSale', sale.id, { totalCents: sale.totalCents, itemCount: sale.items.length });
       return reply.code(201).send({ sale });
