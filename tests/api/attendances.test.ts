@@ -358,4 +358,267 @@ describe('atenciones', () => {
     });
     expect(rejected.statusCode).toBe(400);
   });
+
+  async function catalogServices(session: Awaited<ReturnType<typeof authenticated>>) {
+    const response = await session.app.inject({ method: 'GET', url: '/api/v1/admin/services', headers: { cookie: session.cookie } });
+    expect(response.statusCode).toBe(200);
+    return response.json().services as Array<{ id: string; active: boolean; name: string }>;
+  }
+
+  async function selectorIds(session: Awaited<ReturnType<typeof authenticated>>) {
+    const response = await session.app.inject({ method: 'GET', url: '/api/v1/attendances/services', headers: { cookie: session.cookie } });
+    expect(response.statusCode).toBe(200);
+    return (response.json().services as Array<{ id: string }>).map((service) => service.id);
+  }
+
+  async function saveOrder(session: Awaited<ReturnType<typeof authenticated>>, serviceIds: string[]) {
+    return session.app.inject({
+      method: 'PUT', url: '/api/v1/admin/services/order', headers: { cookie: session.cookie },
+      payload: { serviceIds }
+    });
+  }
+
+  async function deleteService(id: string) {
+    const prisma = new PrismaClient();
+    try { await prisma.service.delete({ where: { id } }); }
+    finally { await prisma.$disconnect(); }
+  }
+
+  it('guarda el orden de los activos y lo repite en catálogo, selector y servicios por empleada', async () => {
+    const nani = await authenticated('nani');
+    const before = await catalogServices(nani);
+    const activeIds = before.filter((service) => service.active).map((service) => service.id);
+    const inactiveIds = before.filter((service) => !service.active).map((service) => service.id);
+    const enabledBefore = await selectorIds(nani);
+    expect(activeIds.length).toBeGreaterThan(1);
+    const reordered = [...activeIds].reverse();
+    try {
+      const saved = await saveOrder(nani, reordered);
+      expect(saved.statusCode).toBe(200);
+      const catalog = await catalogServices(nani);
+      expect(catalog.filter((service) => service.active).map((service) => service.id)).toEqual(reordered);
+      expect(catalog.filter((service) => !service.active).map((service) => service.id)).toEqual(inactiveIds);
+      expect(await selectorIds(nani)).toEqual(reordered.filter((id) => enabledBefore.includes(id)));
+      const assignments = await nani.app.inject({ method: 'GET', url: '/api/v1/admin/service-assignments', headers: { cookie: nani.cookie } });
+      expect(assignments.statusCode).toBe(200);
+      expect((assignments.json().services as Array<{ id: string; active: boolean }>).filter((service) => service.active).map((service) => service.id)).toEqual(reordered);
+    } finally {
+      expect((await saveOrder(nani, activeIds)).statusCode).toBe(200);
+    }
+  });
+
+  it('conserva el orden relativo en el selector de una empleada con solo algunos servicios', async () => {
+    const nani = await authenticated('nani');
+    const employee = await authenticated('lola');
+    const before = await catalogServices(nani);
+    const activeIds = before.filter((service) => service.active).map((service) => service.id);
+    expect(activeIds.length).toBeGreaterThan(2);
+    const listed = await nani.app.inject({ method: 'GET', url: '/api/v1/admin/service-assignments', headers: { cookie: nani.cookie } });
+    const originalServiceIds = listed.json().assignments.find((assignment: { employeeId: string }) => assignment.employeeId === 'lola').serviceIds as string[];
+    const kept = [activeIds[0], activeIds[2]];
+    const reordered = [...activeIds];
+    const moved = reordered.splice(reordered.indexOf(activeIds[2]), 1)[0];
+    reordered.splice(reordered.indexOf(activeIds[0]), 0, moved);
+    try {
+      expect((await nani.app.inject({
+        method: 'PATCH', url: '/api/v1/admin/service-assignments/lola', headers: { cookie: nani.cookie },
+        payload: { serviceIds: kept }
+      })).statusCode).toBe(200);
+      expect(await selectorIds(employee)).toEqual(kept);
+      expect((await saveOrder(nani, reordered)).statusCode).toBe(200);
+      const selector = await selectorIds(employee);
+      expect(selector).toEqual([activeIds[2], activeIds[0]]);
+      expect(selector).not.toContain(activeIds[1]);
+      for (const service of before.filter((item) => !item.active)) expect(selector).not.toContain(service.id);
+    } finally {
+      const restored = await saveOrder(nani, activeIds);
+      const assignments = await nani.app.inject({
+        method: 'PATCH', url: '/api/v1/admin/service-assignments/lola', headers: { cookie: nani.cookie },
+        payload: { serviceIds: originalServiceIds }
+      });
+      expect(restored.statusCode).toBe(200);
+      expect(assignments.statusCode).toBe(200);
+    }
+  });
+
+  it('rechaza una lista incompleta, duplicada o con un id desconocido y no cambia el orden', async () => {
+    const nani = await authenticated('nani');
+    const catalog = await catalogServices(nani);
+    const before = catalog.map((service) => service.id);
+    const activeIds = catalog.filter((service) => service.active).map((service) => service.id);
+    const inactiveId = catalog.find((service) => !service.active)?.id;
+    const message = 'Indicá cada servicio activo una sola vez, sin repetidos ni ids desconocidos.';
+    const attempts = [
+      [...activeIds, 'servicio-que-no-existe'],
+      activeIds.slice(1),
+      [...activeIds, activeIds[0]],
+      ...(inactiveId ? [[...activeIds, inactiveId]] : [])
+    ];
+    try {
+      for (const serviceIds of attempts) {
+        const rejected = await saveOrder(nani, serviceIds);
+        expect(rejected.statusCode).toBe(400);
+        expect(rejected.json().error.message).toBe(message);
+        expect((await catalogServices(nani)).map((service) => service.id)).toEqual(before);
+      }
+      const notAList = await nani.app.inject({
+        method: 'PUT', url: '/api/v1/admin/services/order', headers: { cookie: nani.cookie },
+        payload: { serviceIds: 'perfilado-cejas' }
+      });
+      expect(notAList.statusCode).toBe(400);
+      expect(notAList.json().error.message).toBe(message);
+      expect((await catalogServices(nani)).map((service) => service.id)).toEqual(before);
+    } finally {
+      expect((await saveOrder(nani, activeIds)).statusCode).toBe(200);
+    }
+  });
+
+  it('no deja que una empleada guarde el orden', async () => {
+    const nani = await authenticated('nani');
+    const employee = await authenticated('lula');
+    const before = (await catalogServices(nani)).map((service) => service.id);
+    const activeIds = (await catalogServices(nani)).filter((service) => service.active).map((service) => service.id);
+    const denied = await employee.app.inject({
+      method: 'PUT', url: '/api/v1/admin/services/order', headers: { cookie: employee.cookie },
+      payload: { serviceIds: [...activeIds].reverse() }
+    });
+    expect(denied.statusCode).toBe(403);
+    expect((await catalogServices(nani)).map((service) => service.id)).toEqual(before);
+  });
+
+  it('ubica un servicio nuevo al final de los activos y no lo mueve al editar nombre, precio o duración', async () => {
+    const nani = await authenticated('nani');
+    const created = await nani.app.inject({
+      method: 'POST', url: '/api/v1/admin/services', headers: { cookie: nani.cookie },
+      payload: { name: 'Orden servicio nuevo', category: 'Pruebas', baseAmountCents: 1500, durationMinutes: 15 }
+    });
+    expect(created.statusCode).toBe(201);
+    const serviceId = created.json().service.id as string;
+    try {
+      const catalog = await catalogServices(nani);
+      const activeIds = catalog.filter((service) => service.active).map((service) => service.id);
+      expect(activeIds.at(-1)).toBe(serviceId);
+      expect(catalog.slice(catalog.findIndex((service) => service.id === serviceId) + 1).every((service) => !service.active)).toBe(true);
+      const order = catalog.map((service) => service.id);
+      const updated = await nani.app.inject({
+        method: 'PATCH', url: `/api/v1/admin/services/${serviceId}`, headers: { cookie: nani.cookie },
+        payload: { name: 'Orden servicio editado', baseAmountCents: 1800, durationMinutes: 20 }
+      });
+      expect(updated.statusCode).toBe(200);
+      expect((await catalogServices(nani)).map((service) => service.id)).toEqual(order);
+    } finally {
+      await deleteService(serviceId);
+    }
+  });
+
+  it('manda un servicio desactivado al final de la lista y lo oculta en el selector', async () => {
+    const nani = await authenticated('nani');
+    const created = await nani.app.inject({
+      method: 'POST', url: '/api/v1/admin/services', headers: { cookie: nani.cookie },
+      payload: { name: 'Orden servicio a desactivar', category: 'Pruebas', baseAmountCents: 1500, durationMinutes: 15 }
+    });
+    const serviceId = created.json().service.id as string;
+    try {
+      const disabled = await nani.app.inject({
+        method: 'PATCH', url: `/api/v1/admin/services/${serviceId}`, headers: { cookie: nani.cookie },
+        payload: { active: false }
+      });
+      expect(disabled.statusCode).toBe(200);
+      const catalog = await catalogServices(nani);
+      expect(catalog.at(-1)?.id).toBe(serviceId);
+      expect(catalog.at(-1)?.active).toBe(false);
+      expect(await selectorIds(nani)).not.toContain(serviceId);
+    } finally {
+      await deleteService(serviceId);
+    }
+  });
+
+  it('al volver a activar deja el servicio al final de los activos y en el selector', async () => {
+    const nani = await authenticated('nani');
+    const created = await nani.app.inject({
+      method: 'POST', url: '/api/v1/admin/services', headers: { cookie: nani.cookie },
+      payload: { name: 'Orden servicio a reactivar', category: 'Pruebas', baseAmountCents: 1500, durationMinutes: 15 }
+    });
+    const serviceId = created.json().service.id as string;
+    try {
+      expect((await nani.app.inject({
+        method: 'PATCH', url: `/api/v1/admin/services/${serviceId}`, headers: { cookie: nani.cookie },
+        payload: { active: false }
+      })).statusCode).toBe(200);
+      const enabled = await nani.app.inject({
+        method: 'PATCH', url: `/api/v1/admin/services/${serviceId}`, headers: { cookie: nani.cookie },
+        payload: { active: true }
+      });
+      expect(enabled.statusCode).toBe(200);
+      const catalog = await catalogServices(nani);
+      expect(catalog.filter((service) => service.active).at(-1)?.id).toBe(serviceId);
+      expect(catalog.slice(catalog.findIndex((service) => service.id === serviceId) + 1).every((service) => !service.active)).toBe(true);
+      expect((await selectorIds(nani)).at(-1)).toBe(serviceId);
+    } finally {
+      await deleteService(serviceId);
+    }
+  });
+
+  it('deja el inactivo detrás al crear, reordenar, desactivar, reactivar y eliminar', async () => {
+    const nani = await authenticated('nani');
+    const originalActive = (await catalogServices(nani)).filter((service) => service.active).map((service) => service.id);
+    const createdIds: string[] = [];
+    const create = async (name: string) => {
+      const response = await nani.app.inject({
+        method: 'POST', url: '/api/v1/admin/services', headers: { cookie: nani.cookie },
+        payload: { name, category: 'Pruebas de orden', baseAmountCents: 1500, durationMinutes: 15 }
+      });
+      expect(response.statusCode).toBe(201);
+      const id = response.json().service.id as string;
+      createdIds.push(id);
+      return id;
+    };
+    try {
+      const alpha = await create('Orden ancla inactiva');
+      const beta = await create('Orden fila a eliminar');
+      expect((await nani.app.inject({
+        method: 'PATCH', url: `/api/v1/admin/services/${alpha}`, headers: { cookie: nani.cookie },
+        payload: { active: false }
+      })).statusCode).toBe(200);
+      let catalog = await catalogServices(nani);
+      expect(catalog.at(-1)?.id).toBe(alpha);
+      expect(catalog.filter((service) => service.active).at(-1)?.id).toBe(beta);
+
+      const gamma = await create('Orden fila nueva');
+      catalog = await catalogServices(nani);
+      expect(catalog.filter((service) => service.active).at(-1)?.id).toBe(gamma);
+      expect(catalog.at(-1)?.id).toBe(alpha);
+
+      const activeIds = catalog.filter((service) => service.active).map((service) => service.id);
+      const reordered = [gamma, ...activeIds.filter((id) => id !== gamma)];
+      expect((await saveOrder(nani, reordered)).statusCode).toBe(200);
+      catalog = await catalogServices(nani);
+      expect(catalog.filter((service) => service.active).map((service) => service.id)).toEqual(reordered);
+      expect(catalog.at(-1)?.id).toBe(alpha);
+
+      const rejected = await saveOrder(nani, [...reordered, alpha]);
+      expect(rejected.statusCode).toBe(400);
+      expect((await catalogServices(nani)).map((service) => service.id)).toEqual(catalog.map((service) => service.id));
+
+      const removed = await nani.app.inject({
+        method: 'DELETE', url: `/api/v1/admin/services/${beta}`, headers: { cookie: nani.cookie }
+      });
+      expect(removed.statusCode).toBe(200);
+      catalog = await catalogServices(nani);
+      expect(catalog.at(-1)?.id).toBe(beta);
+      expect(catalog.at(-2)?.id).toBe(alpha);
+      expect(catalog.find((service) => service.id === beta)?.active).toBe(false);
+
+      expect((await nani.app.inject({
+        method: 'PATCH', url: `/api/v1/admin/services/${alpha}`, headers: { cookie: nani.cookie },
+        payload: { active: true }
+      })).statusCode).toBe(200);
+      catalog = await catalogServices(nani);
+      expect(catalog.filter((service) => service.active).at(-1)?.id).toBe(alpha);
+      expect(catalog.at(-1)?.id).toBe(beta);
+    } finally {
+      for (const id of createdIds) await deleteService(id);
+      expect((await saveOrder(nani, originalActive)).statusCode).toBe(200);
+    }
+  });
 });

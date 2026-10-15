@@ -160,12 +160,41 @@ function Access({ onLogin }: { onLogin: (user: PublicUser) => void }) {
   </main>;
 }
 
+function placeCatalogService(list: Service[], service: Service) {
+  const rest = list.filter((item) => item.id !== service.id);
+  if (!service.active) return [...rest, service];
+  return [...rest.filter((item) => item.active), service, ...rest.filter((item) => !item.active)];
+}
+
+function moveActiveService(list: Service[], serviceId: string, toIndex: number) {
+  const actives = list.filter((service) => service.active);
+  const fromIndex = actives.findIndex((service) => service.id === serviceId);
+  if (fromIndex < 0 || fromIndex === toIndex) return list;
+  const nextActives = [...actives];
+  const [moved] = nextActives.splice(fromIndex, 1);
+  nextActives.splice(toIndex, 0, moved);
+  return [...nextActives, ...list.filter((service) => !service.active)];
+}
+
+function orderServicesLike(list: Service[], ordered: Service[]) {
+  const rank = new Map(ordered.map((service, index) => [service.id, index]));
+  return [...list].sort((first, second) => (rank.get(first.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(second.id) ?? Number.MAX_SAFE_INTEGER));
+}
+
 function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
   const isAdmin = user.role === 'ADMIN';
   const [adminTab, setAdminTab] = useState<'attendance' | 'catalog' | 'assignments' | 'employees' | 'expenses' | 'reports' | 'activity' | 'products' | 'remittances'>('attendance');
   const [selectedDate, setSelectedDate] = useState(todayInArgentina);
   const [services, setServices] = useState<Service[]>([]);
   const [catalog, setCatalog] = useState<Service[]>([]);
+  const catalogRef = useRef(catalog);
+  const catalogListRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ pointerId: number; serviceId: string; origin: Service[] } | null>(null);
+  const catalogEpoch = useRef(0);
+  const [draggingServiceId, setDraggingServiceId] = useState<string | null>(null);
+  useEffect(() => {
+    if (dragRef.current === null) catalogRef.current = catalog;
+  }, [catalog]);
   const [catalogEditingId, setCatalogEditingId] = useState<string | null>(null);
   const [serviceToDelete, setServiceToDelete] = useState<Service | null>(null);
   const [catalogName, setCatalogName] = useState('');
@@ -775,9 +804,10 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
       });
       const data = await response.json();
       if (!response.ok) return setCatalogError(data.error?.message ?? 'No se pudo guardar el servicio.');
+      catalogEpoch.current += 1;
       setCatalog((current) => catalogEditingId
         ? current.map((service) => service.id === catalogEditingId ? data.service : service)
-        : [...current, data.service]);
+        : placeCatalogService(current, data.service));
       setServices((current) => catalogEditingId
         ? current.map((service) => service.id === catalogEditingId ? data.service : service)
         : [...current, data.service]);
@@ -801,10 +831,11 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     });
     const data = await response.json();
     if (!response.ok) return setCatalogError(data.error?.message ?? 'No se pudo cambiar el estado.');
-    setCatalog((current) => current.map((item) => item.id === service.id ? data.service : item));
-    setServices((current) => service.active
-      ? current.filter((item) => item.id !== service.id)
-      : [...current, data.service]);
+    catalogEpoch.current += 1;
+    setCatalog((current) => placeCatalogService(current, data.service));
+    setServices((current) => data.service.active
+      ? placeCatalogService(current, data.service)
+      : current.filter((item) => item.id !== service.id));
   }
 
   async function deleteCatalogService() {
@@ -814,7 +845,8 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
       const response = await fetch(`${API}/admin/services/${encodeURIComponent(serviceToDelete.id)}`, { method: 'DELETE', credentials: 'include' });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error?.message ?? 'No se pudo eliminar el servicio.');
-      setCatalog((current) => current.map((item) => item.id === serviceToDelete.id ? data.service : item));
+      catalogEpoch.current += 1;
+      setCatalog((current) => placeCatalogService(current, data.service));
       setServices((current) => current.filter((item) => item.id !== serviceToDelete.id));
       setServiceToDelete(null);
       showSuccess('Servicio eliminado correctamente.');
@@ -823,6 +855,78 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     } finally {
       setCatalogSaving(false);
     }
+  }
+
+  function onDragHandlePointerDown(event: React.PointerEvent<HTMLButtonElement>, service: Service) {
+    if (!service.active || event.button !== 0 || catalogSaving || dragRef.current) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const pointerId = event.pointerId;
+    dragRef.current = { pointerId, serviceId: service.id, origin: catalogRef.current };
+    setDraggingServiceId(service.id);
+    setCatalogError('');
+    const move = (pointerEvent: PointerEvent) => {
+      const drag = dragRef.current;
+      if (pointerEvent.pointerId !== pointerId || !drag) return;
+      pointerEvent.preventDefault();
+      const list = catalogListRef.current;
+      if (!list) return;
+      const cards = [...list.querySelectorAll<HTMLElement>('.service-catalog-card[data-active="true"]')];
+      let toIndex = 0;
+      for (const card of cards) {
+        if (card.dataset.serviceId === drag.serviceId) continue;
+        const rect = card.getBoundingClientRect();
+        if (pointerEvent.clientY > rect.top + rect.height / 2) toIndex += 1;
+      }
+      const next = moveActiveService(catalogRef.current, drag.serviceId, toIndex);
+      if (next !== catalogRef.current) {
+        catalogRef.current = next;
+        setCatalog(next);
+      }
+    };
+    const finish = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId !== pointerId) return;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      const drag = dragRef.current;
+      dragRef.current = null;
+      setDraggingServiceId(null);
+      if (!drag) return;
+      if (pointerEvent.type === 'pointercancel') {
+        catalogRef.current = drag.origin;
+        setCatalog(drag.origin);
+        return;
+      }
+      const nextIds = catalogRef.current.filter((item) => item.active).map((item) => item.id);
+      const originIds = drag.origin.filter((item) => item.active).map((item) => item.id);
+      if (nextIds.join('\0') === originIds.join('\0')) return;
+      const epoch = catalogEpoch.current;
+      void fetch(`${API}/admin/services/order`, {
+        method: 'PUT', credentials: 'include', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ serviceIds: nextIds })
+      }).then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (catalogEpoch.current !== epoch) return;
+        if (!response.ok || !Array.isArray(data.services)) {
+          catalogRef.current = drag.origin;
+          setCatalog(drag.origin);
+          setCatalogError(data.error?.message ?? 'No se pudo guardar el orden.');
+          return;
+        }
+        catalogRef.current = data.services;
+        setCatalog(data.services);
+        setServices((current) => orderServicesLike(current, data.services));
+      }).catch(() => {
+        if (catalogEpoch.current !== epoch) return;
+        catalogRef.current = drag.origin;
+        setCatalog(drag.origin);
+        setCatalogError('No se pudo conectar con la aplicación.');
+      });
+    };
+    window.addEventListener('pointermove', move, { passive: false });
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
   }
 
   useEffect(() => {
@@ -964,8 +1068,9 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
           {catalogError && <p className="error" role="alert">{catalogError}</p>}
           <div className="home-actions"><button disabled={catalogSaving} type="submit">{catalogSaving ? 'Guardando…' : catalogEditingId ? 'Guardar cambios' : 'Crear servicio'}</button>{catalogEditingId && <button className="secondary" type="button" onClick={() => { setCatalogEditingId(null); setCatalogName(''); setCatalogCategory(''); setCatalogPrice(''); setCatalogDuration(''); }}>Cancelar</button>}</div>
         </form>
-        <div className="catalog-list service-catalog-list">{catalog.map((service) => <article className={`catalog-card service-catalog-card ${service.active ? '' : 'catalog-inactive'}`} key={service.id}>
-          <div><strong>{service.name}</strong><span>{service.category} · {formatAmount(service.baseAmountCents)} · {service.durationMinutes} min</span><span>{service.active ? 'Activo' : 'Inactivo'}</span></div>
+        <div className="catalog-list service-catalog-list" ref={catalogListRef}>{catalog.map((service) => <article className={`catalog-card service-catalog-card ${service.active ? '' : 'catalog-inactive'} ${draggingServiceId === service.id ? 'is-dragging' : ''}`} key={service.id} data-service-id={service.id} data-active={service.active ? 'true' : 'false'}>
+          {service.active && <button type="button" className="service-drag-handle" aria-label={`Arrastrar ${service.name}`} onPointerDown={(event) => onDragHandlePointerDown(event, service)}>⋮⋮</button>}
+          <div className="service-catalog-info"><strong>{service.name}</strong><span>{service.category} · {formatAmount(service.baseAmountCents)} · {service.durationMinutes} min</span><span>{service.active ? 'Activo' : 'Inactivo'}</span></div>
           <div className="catalog-actions"><button type="button" onClick={() => editCatalogService(service)}>Editar</button><button className="secondary" type="button" onClick={() => toggleCatalogService(service)}>{service.active ? 'Desactivar' : 'Activar'}</button><button className="danger-button" type="button" onClick={() => setServiceToDelete(service)}>Eliminar</button></div>
         </article>)}</div>
       </section>}

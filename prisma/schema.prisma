@@ -38,6 +38,7 @@ model Service {
   baseAmountCents Int
   durationMinutes Int
   active          Boolean      @default(true)
+  sortOrder       Int          @default(0)
   employees       User[]       @relation("ServiceEmployees")
   attendances     Attendance[]
   createdAt       DateTime     @default(now())

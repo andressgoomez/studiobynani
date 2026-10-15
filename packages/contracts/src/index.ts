@@ -52,6 +52,10 @@ export interface UpdateServiceRequest {
   active?: boolean;
 }
 
+export interface ReorderServicesRequest {
+  serviceIds: string[];
+}
+
 export interface ServiceAssignment {
   employeeId: UserId;
   serviceIds: string[];

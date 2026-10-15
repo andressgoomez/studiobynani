@@ -49,6 +49,30 @@ describe('inicio de la base real', () => {
     rmSync(backupPath);
   });
 
+  it('rellena el orden visible de hoy cuando la columna todavía está en cero', async () => {
+    const previous = process.env.DATABASE_URL;
+    const dir = mkdtempSync(path.join(tmpdir(), 'nani-order-'));
+    const url = `file:${path.join(dir, 'order.sqlite').replaceAll('\\', '/')}`;
+    process.env.DATABASE_URL = url;
+    execSync('npx prisma db push --skip-generate --accept-data-loss', { cwd: projectRoot, env: process.env, stdio: 'pipe' });
+    const { PrismaClient } = await import('@prisma/client');
+    const prisma = new PrismaClient();
+    try {
+      await prisma.service.create({ data: { id: 'b', name: 'B', category: 'Zeta', baseAmountCents: 1, durationMinutes: 1, active: true, sortOrder: 0 } });
+      await prisma.service.create({ data: { id: 'a', name: 'A', category: 'Zeta', baseAmountCents: 1, durationMinutes: 1, active: true, sortOrder: 0 } });
+      await prisma.service.create({ data: { id: 'c', name: 'C', category: 'Alfa', baseAmountCents: 1, durationMinutes: 1, active: false, sortOrder: 0 } });
+      const sql = readFileSync(path.join(projectRoot, 'prisma', 'migrations', '20261015030000_add_service_sort_order', 'migration.sql'), 'utf8');
+      await prisma.$executeRawUnsafe(sql.slice(sql.indexOf('UPDATE')));
+      const ordered = await prisma.service.findMany({ orderBy: { sortOrder: 'asc' } });
+      expect(ordered.map((service) => service.id)).toEqual(['a', 'b', 'c']);
+    } finally {
+      await prisma.$disconnect();
+      if (previous === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('deja 23 servicios sin movimiento y el arranque no pisa lo que NANI cambió', async () => {
     process.env.DATABASE_URL = databaseUrl;
     execSync('npx prisma db push --skip-generate --accept-data-loss', { cwd: projectRoot, env: process.env, stdio: 'pipe' });
@@ -115,6 +139,9 @@ describe('inicio de la base real', () => {
     expect(await prisma.user.count()).toBe(4);
     expect(services).toHaveLength(23);
     expect(services.every((service) => service.employees.length === 0)).toBe(true);
+    const canonical = [...INITIAL_SERVICES].sort((left, right) => Number(right.active) - Number(left.active)
+      || (left.category < right.category ? -1 : left.category > right.category ? 1 : left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    expect([...services].sort((left, right) => left.sortOrder - right.sortOrder).map((service) => service.id)).toEqual(canonical.map((service) => service.id));
     expect(services.some((service) => /d[ií]a completo/i.test(service.name))).toBe(false);
     expect(await prisma.service.findUnique({ where: { id: 'fuera' } })).toBeNull();
     expect(await prisma.attendance.count()).toBe(0);
@@ -170,6 +197,10 @@ describe('inicio de la base real', () => {
     expect(laminado.employees).toHaveLength(0);
     expect(laminado.baseAmountCents).toBe(INITIAL_SERVICES.find((service) => service.id === 'laminado-cejas')?.baseAmountCents);
     expect(untouched.employees).toHaveLength(0);
+    const ordered = await check.service.findMany({ orderBy: { sortOrder: 'asc' } });
+    const activeOrdered = ordered.filter((service) => service.active);
+    expect(activeOrdered.at(-1)?.id).toBe('laminado-cejas');
+    expect(ordered.slice(ordered.findIndex((service) => service.id === 'laminado-cejas') + 1).every((service) => !service.active)).toBe(true);
     } finally {
       await check.$disconnect();
     }

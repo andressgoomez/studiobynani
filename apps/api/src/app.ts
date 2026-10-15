@@ -5,8 +5,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { existsSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { PrismaClient } from '@prisma/client';
-import { ACTIVE_USERS, type Attendance, type ChangeEmployeePinRequest, type CreateAttendanceRequest, type CreateServiceRequest, type LoginRequest, type SessionUser, type UpdateAttendanceRequest, type UpdateEmployeeStatusRequest, type UpdateServiceRequest } from '@studiobynani/contracts';
+import { Prisma, PrismaClient } from '@prisma/client';
+import { ACTIVE_USERS, type Attendance, type ChangeEmployeePinRequest, type CreateAttendanceRequest, type CreateServiceRequest, type LoginRequest, type ReorderServicesRequest, type SessionUser, type UpdateAttendanceRequest, type UpdateEmployeeStatusRequest, type UpdateServiceRequest } from '@studiobynani/contracts';
 import { calculateAttendanceBundleAmounts, calculateAttendanceAmounts, can, DEFAULT_USERS, hashPin, INITIAL_SERVICES, verifyPin } from '@studiobynani/domain';
 
 const SESSION_COOKIE = 'studiobynani_session';
@@ -64,6 +64,29 @@ function requestedServiceIds(body: { serviceId?: unknown; serviceIds?: unknown }
   const ids = Array.isArray(body.serviceIds) ? body.serviceIds.filter((id): id is string => typeof id === 'string' && id.length > 0) : [];
   if (ids.length) return [...new Set(ids)];
   return typeof body.serviceId === 'string' && body.serviceId ? [body.serviceId] : [];
+}
+
+type ServiceDb = PrismaClient | Prisma.TransactionClient;
+
+class InvalidServiceOrder extends Error {}
+
+async function writeServiceOrder(db: ServiceDb, orderedIds: string[]) {
+  for (let index = 0; index < orderedIds.length; index += 1) {
+    await db.service.update({ where: { id: orderedIds[index] }, data: { sortOrder: index } });
+  }
+}
+
+async function placeService(db: ServiceDb, serviceId: string, placement: 'end-of-actives' | 'end') {
+  const services = await db.service.findMany({ orderBy: { sortOrder: 'asc' }, select: { id: true, active: true } });
+  const others = services.filter((service) => service.id !== serviceId);
+  const orderedIds = placement === 'end'
+    ? [...others.map((service) => service.id), serviceId]
+    : [
+        ...others.filter((service) => service.active).map((service) => service.id),
+        serviceId,
+        ...others.filter((service) => !service.active).map((service) => service.id)
+      ];
+  await writeServiceOrder(db, orderedIds);
 }
 
 function storedServiceIds(attendance: { serviceId: string; serviceIdsJson: string }) {
@@ -130,6 +153,23 @@ export function buildApp(): FastifyInstance {
           create: { id: user.id, displayName: user.displayName, role: user.role, active: user.active, pinHash: user.pinHash }
         });
       }
+      const existingServiceIds = new Set((await transaction.service.findMany({ select: { id: true } })).map((service) => service.id));
+      const missingServices = INITIAL_SERVICES.filter((service) => !existingServiceIds.has(service.id))
+        .sort((left, right) => Number(right.active) - Number(left.active) || (left.category < right.category ? -1 : left.category > right.category ? 1 : left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+      for (const service of missingServices) {
+        await transaction.service.create({
+          data: {
+            id: service.id,
+            name: service.name,
+            category: service.category,
+            baseAmountCents: service.baseAmountCents,
+            durationMinutes: service.durationMinutes,
+            active: service.active,
+            sortOrder: 0
+          }
+        });
+        await placeService(transaction, service.id, service.active ? 'end-of-actives' : 'end');
+      }
       for (const service of INITIAL_SERVICES) {
         await transaction.service.upsert({
           where: { id: service.id },
@@ -140,7 +180,8 @@ export function buildApp(): FastifyInstance {
             category: service.category,
             baseAmountCents: service.baseAmountCents,
             durationMinutes: service.durationMinutes,
-            active: service.active
+            active: service.active,
+            sortOrder: 0
           }
         });
       }
@@ -221,7 +262,35 @@ export function buildApp(): FastifyInstance {
     const session = await requireSession(request, reply);
     if (!session) return;
     if (!can(session, 'admin:read')) return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'No tenés permisos para esta función.' } });
-    const persisted = await prisma.service.findMany({ include: { employees: true }, orderBy: [{ active: 'desc' }, { category: 'asc' }, { name: 'asc' }] });
+    const persisted = await prisma.service.findMany({ include: { employees: true }, orderBy: { sortOrder: 'asc' } });
+    return { services: persisted.map(serviceResponse) };
+  });
+
+  app.put<{ Body: Partial<ReorderServicesRequest> }>('/api/v1/admin/services/order', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    if (!can(session, 'admin:write')) return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'No tenés permisos para esta función.' } });
+    const serviceIds = request.body?.serviceIds;
+    const invalidOrder = () => reply.code(400).send({
+      error: { code: 'VALIDATION_ERROR', message: 'Indicá cada servicio activo una sola vez, sin repetidos ni ids desconocidos.' }
+    });
+    if (!Array.isArray(serviceIds) || serviceIds.some((serviceId) => typeof serviceId !== 'string' || !serviceId)) return invalidOrder();
+    if (new Set(serviceIds).size !== serviceIds.length) return invalidOrder();
+    try {
+      await prisma.$transaction(async (transaction) => {
+        const current = await transaction.service.findMany({ orderBy: { sortOrder: 'asc' }, select: { id: true, active: true } });
+        const activeIds = new Set(current.filter((service) => service.active).map((service) => service.id));
+        if (serviceIds.length !== activeIds.size || serviceIds.some((serviceId) => !activeIds.has(serviceId))) throw new InvalidServiceOrder();
+        await writeServiceOrder(transaction, [
+          ...serviceIds,
+          ...current.filter((service) => !service.active).map((service) => service.id)
+        ]);
+      });
+    } catch (error) {
+      if (error instanceof InvalidServiceOrder) return invalidOrder();
+      throw error;
+    }
+    const persisted = await prisma.service.findMany({ include: { employees: true }, orderBy: { sortOrder: 'asc' } });
     return { services: persisted.map(serviceResponse) };
   });
 
@@ -232,17 +301,22 @@ export function buildApp(): FastifyInstance {
     const body = request.body ?? {};
     const fields = serviceValidation(body, true);
     if (Object.keys(fields).length) return validation(reply, fields);
-    const created = await prisma.service.create({
-      data: {
-        id: randomUUID(),
-        name: body.name!.trim(),
-        category: body.category!.trim(),
-        baseAmountCents: body.baseAmountCents!,
-        durationMinutes: body.durationMinutes!,
-        active: true,
-        employees: { connect: DEFAULT_USERS.filter((user) => user.active).map((user) => ({ id: user.id })) }
-      },
-      include: { employees: true }
+    const created = await prisma.$transaction(async (transaction) => {
+      const service = await transaction.service.create({
+        data: {
+          id: randomUUID(),
+          name: body.name!.trim(),
+          category: body.category!.trim(),
+          baseAmountCents: body.baseAmountCents!,
+          durationMinutes: body.durationMinutes!,
+          active: true,
+          sortOrder: 0,
+          employees: { connect: DEFAULT_USERS.filter((user) => user.active).map((user) => ({ id: user.id })) }
+        },
+        include: { employees: true }
+      });
+      await placeService(transaction, service.id, 'end-of-actives');
+      return service;
     });
     return reply.code(201).send({ service: serviceResponse(created) });
   });
@@ -256,16 +330,21 @@ export function buildApp(): FastifyInstance {
     if (Object.keys(fields).length) return validation(reply, fields);
     const existing = await prisma.service.findUnique({ where: { id: request.params.id } });
     if (!existing) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Servicio no encontrado.' } });
-    const updated = await prisma.service.update({
-      where: { id: existing.id },
-      data: {
-        ...(body.name !== undefined ? { name: body.name.trim() } : {}),
-        ...(body.category !== undefined ? { category: body.category.trim() } : {}),
-        ...(body.baseAmountCents !== undefined ? { baseAmountCents: body.baseAmountCents } : {}),
-        ...(body.durationMinutes !== undefined ? { durationMinutes: body.durationMinutes } : {}),
-        ...(body.active !== undefined ? { active: body.active } : {})
-      },
-      include: { employees: true }
+    const moves = body.active !== undefined && body.active !== existing.active;
+    const updated = await prisma.$transaction(async (transaction) => {
+      const service = await transaction.service.update({
+        where: { id: existing.id },
+        data: {
+          ...(body.name !== undefined ? { name: body.name.trim() } : {}),
+          ...(body.category !== undefined ? { category: body.category.trim() } : {}),
+          ...(body.baseAmountCents !== undefined ? { baseAmountCents: body.baseAmountCents } : {}),
+          ...(body.durationMinutes !== undefined ? { durationMinutes: body.durationMinutes } : {}),
+          ...(body.active !== undefined ? { active: body.active } : {})
+        },
+        include: { employees: true }
+      });
+      if (moves) await placeService(transaction, service.id, body.active ? 'end-of-actives' : 'end');
+      return service;
     });
     return { service: serviceResponse(updated) };
   });
@@ -275,7 +354,11 @@ export function buildApp(): FastifyInstance {
     if (!session || !can(session, 'admin:write')) return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'No tenés permisos para esta función.' } });
     const existing = await prisma.service.findUnique({ where: { id: request.params.id } });
     if (!existing) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Servicio no encontrado.' } });
-    const updated = await prisma.service.update({ where: { id: existing.id }, data: { active: false }, include: { employees: true } });
+    const updated = await prisma.$transaction(async (transaction) => {
+      const service = await transaction.service.update({ where: { id: existing.id }, data: { active: false }, include: { employees: true } });
+      await placeService(transaction, service.id, 'end');
+      return service;
+    });
     await audit(session.id, 'service.deleted', 'Service', existing.id, { name: existing.name });
     return { service: serviceResponse(updated) };
   });
@@ -286,7 +369,7 @@ export function buildApp(): FastifyInstance {
     if (session.id !== 'nani' || !can(session, 'admin:read')) return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'No tenés permisos para esta función.' } });
     const [employees, persisted] = await Promise.all([
       prisma.user.findMany({ where: { active: true, role: { in: ['EMPLOYEE', 'ADMIN'] } }, include: { services: { select: { id: true } } }, orderBy: { displayName: 'asc' } }),
-      prisma.service.findMany({ include: { employees: { select: { id: true } } }, orderBy: [{ active: 'desc' }, { category: 'asc' }, { name: 'asc' }] })
+      prisma.service.findMany({ include: { employees: { select: { id: true } } }, orderBy: { sortOrder: 'asc' } })
     ]);
     return {
       employees: employees.map((employee) => ({
@@ -328,7 +411,7 @@ export function buildApp(): FastifyInstance {
     if (!session) return;
     const persisted = await prisma.service.findMany({
       where: { active: true, employees: { some: { id: session.id } } },
-      orderBy: [{ category: 'asc' }, { name: 'asc' }]
+      orderBy: { sortOrder: 'asc' }
     });
     return { services: persisted.map((service) => ({ ...service, enabledFor: [session.id] })) };
   });

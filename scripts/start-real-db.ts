@@ -22,6 +22,9 @@ export async function runAfterSuccessfulBackup(backup: () => Promise<void>, appl
 export async function applyRealStart(prisma: PrismaClient) {
     const catalogIds = INITIAL_SERVICES.map((service) => service.id);
     const userIds = DEFAULT_USERS.map((user) => user.id);
+    const canonicalOrder = [...INITIAL_SERVICES].sort((left, right) => Number(right.active) - Number(left.active)
+      || (left.category < right.category ? -1 : left.category > right.category ? 1 : left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    const sortOrderOf = new Map(canonicalOrder.map((service, index) => [service.id, index]));
 
     await prisma.$transaction(async (transaction) => {
       await transaction.productSaleItem.deleteMany();
@@ -74,6 +77,7 @@ export async function applyRealStart(prisma: PrismaClient) {
             baseAmountCents: service.baseAmountCents,
             durationMinutes: service.durationMinutes,
             active: true,
+            sortOrder: sortOrderOf.get(service.id) ?? 0,
             employees: { set: [] }
           },
           create: {
@@ -82,7 +86,8 @@ export async function applyRealStart(prisma: PrismaClient) {
             category: service.category,
             baseAmountCents: service.baseAmountCents,
             durationMinutes: service.durationMinutes,
-            active: true
+            active: true,
+            sortOrder: sortOrderOf.get(service.id) ?? 0
           }
         });
       }
