@@ -8,9 +8,10 @@
     "start": "node dist/server.js"
   },
   "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/static": "^10.1.6",
     "@studiobynani/contracts": "0.1.0",
     "@studiobynani/domain": "0.1.0",
-    "@fastify/cookie": "^11.0.2",
     "fastify": "^5.12.5"
   }
 }

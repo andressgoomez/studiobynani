@@ -1,8 +1,9 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
+import fastifyStatic from '@fastify/static';
 import { randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { PrismaClient } from '@prisma/client';
 import { ACTIVE_USERS, type Attendance, type ChangeEmployeePinRequest, type CreateAttendanceRequest, type CreateServiceRequest, type LoginRequest, type SessionUser, type UpdateAttendanceRequest, type UpdateEmployeeStatusRequest, type UpdateServiceRequest } from '@studiobynani/contracts';
@@ -1320,6 +1321,21 @@ export function buildApp(): FastifyInstance {
       }))
     };
   });
+
+  if (process.env.SERVE_WEB === 'true') {
+    const webDist = path.join(projectRoot, 'apps', 'web', 'dist');
+    if (!existsSync(webDist)) {
+      throw new Error(`No está el sitio compilado en ${webDist}.`);
+    }
+    void app.register(fastifyStatic, { root: webDist });
+    app.setNotFoundHandler((request, reply) => {
+      const url = request.url.split('?')[0] ?? request.url;
+      if (url.startsWith('/api/')) {
+        return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'No encontrado.' } });
+      }
+      return reply.sendFile('index.html');
+    });
+  }
 
   return app;
 }
