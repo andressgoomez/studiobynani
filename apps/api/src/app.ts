@@ -185,6 +185,12 @@ export function buildApp(): FastifyInstance {
           }
         });
       }
+      const stored = await transaction.service.findMany({ select: { id: true, name: true, category: true, active: true, sortOrder: true } });
+      if (stored.length > 1 && new Set(stored.map((service) => service.sortOrder)).size === 1) {
+        const ordered = [...stored].sort((left, right) => Number(right.active) - Number(left.active)
+          || (left.category < right.category ? -1 : left.category > right.category ? 1 : left.name < right.name ? -1 : left.name > right.name ? 1 : left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+        await writeServiceOrder(transaction, ordered.map((service) => service.id));
+      }
     });
   });
   app.addHook('onClose', async () => {
