@@ -2,8 +2,12 @@ services:
   - type: web
     name: studiobynani
     runtime: node
-    plan: free
+    plan: 0.5c-512mb
     region: ohio
+    disk:
+      name: studiobynani-data
+      mountPath: /opt/render/project/src/prisma/data
+      sizeGB: 1
     buildCommand: npm install --include=dev && npx prisma generate && npm run build --workspace @studiobynani/web
     startCommand: node -e "require('node:fs').mkdirSync('prisma/data',{recursive:true})" && npx prisma db push --skip-generate --accept-data-loss && npx tsx apps/api/src/server.ts
     healthCheckPath: /api/v1/health
