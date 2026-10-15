@@ -559,7 +559,7 @@ export function buildApp(): FastifyInstance {
     const session = await requireSession(request, reply);
     if (!session) return;
     const products = await prisma.product.findMany({
-      where: session.role === 'ADMIN' ? undefined : { active: true },
+      where: { active: true },
       include: { purchases: { select: { quantity: true } }, saleItems: { select: { quantity: true } } },
       orderBy: [{ active: 'desc' }, { name: 'asc' }]
     });
@@ -633,7 +633,7 @@ export function buildApp(): FastifyInstance {
     const session = await requireSession(request, reply);
     if (!session || session.role !== 'ADMIN') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede registrar compras.' } });
     const product = await prisma.product.findUnique({ where: { id: request.params.id } });
-    if (!product) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Producto no encontrado.' } });
+    if (!product || !product.active) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Producto no encontrado.' } });
     const body = request.body ?? {};
     const quantity = typeof body.quantity === 'number' ? body.quantity : 0;
     const unitCostCents = typeof body.unitCostCents === 'number' ? body.unitCostCents : 0;
@@ -650,6 +650,27 @@ export function buildApp(): FastifyInstance {
     await prisma.product.update({ where: { id: product.id }, data: { currentCostCents: unitCostCents, salePriceCents, supplierName } });
     await audit(session.id, 'product.purchase_created', 'ProductPurchase', purchase.id, { productId: product.id, quantity, unitCostCents, salePriceCents });
     return reply.code(201).send({ purchase });
+  });
+
+  app.patch<{ Params: { id: string }; Body: { stock?: unknown } }>('/api/v1/admin/products/:id/stock', async (request, reply) => {
+    const session = await requireSession(request, reply);
+    if (!session) return;
+    if (session.role !== 'ADMIN') return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'Solo NANI puede administrar productos.' } });
+    const stock = request.body?.stock;
+    if (typeof stock !== 'number' || !Number.isInteger(stock) || stock < 0 || stock > 100000) return validation(reply, { stock: 'Ingresá una cantidad entera entre 0 y 100000.' });
+    const updated = await prisma.$transaction(async (tx) => {
+      const product = await tx.product.findUnique({ where: { id: request.params.id }, include: { purchases: { select: { quantity: true } }, saleItems: { select: { quantity: true } } } });
+      if (!product || !product.active) return null;
+      const current = product.purchases.reduce((sum, purchase) => sum + purchase.quantity, 0) - product.saleItems.reduce((sum, item) => sum + item.quantity, 0);
+      const delta = stock - current;
+      const adjustment = delta === 0 ? null : await tx.productPurchase.create({
+        data: { id: randomUUID(), productId: product.id, quantity: delta, unitCostCents: product.currentCostCents, supplierName: product.supplierName, purchasedAt: businessDate(new Date()), createdById: session.id }
+      });
+      return { id: product.id, stock, currentCostCents: product.currentCostCents, salePriceCents: product.salePriceCents, previousStock: current, adjustmentId: adjustment?.id ?? null };
+    });
+    if (!updated) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Producto no encontrado.' } });
+    if (updated.adjustmentId) await audit(session.id, 'product.stock_adjusted', 'ProductPurchase', updated.adjustmentId, { productId: updated.id, previousStock: updated.previousStock, stock });
+    return { product: { id: updated.id, stock: updated.stock, currentCostCents: updated.currentCostCents, salePriceCents: updated.salePriceCents } };
   });
 
   app.get<{ Querystring: { date?: string } }>('/api/v1/product-sales/recent', async (request, reply) => {
