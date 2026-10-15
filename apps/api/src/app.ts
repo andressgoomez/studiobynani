@@ -79,7 +79,7 @@ function productFinancials(supplierType: string, sellerId: string, totalCents: n
   if (supplierType === 'once') {
     return {
       employeeCommissionCents: 0,
-      amountToNaniCents: sellerId === 'nani' ? 0 : totalCents,
+      amountToNaniCents: 0,
       commonBoxCents: totalCents
     };
   }

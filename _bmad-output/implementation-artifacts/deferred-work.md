@@ -87,3 +87,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-inicio-base-datos-reales.md`
   summary: Un servicio nuevo creado por NANI queda habilitado para todas las usuarias activas.
   evidence: `POST /api/v1/admin/services` conecta `DEFAULT_USERS` activos y este cambio no tocó esa línea.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-3-5-dejar-los-productos-once-en-la-caja-comun.md`
+  summary: Editar una venta recalcula el destino con el origen actual del producto, no con el de la venta original.
+  evidence: `PATCH /api/v1/product-sales/:id` ya llamaba a `productFinancials` con `product.supplierType` antes de este cambio. La línea no guarda el origen.
