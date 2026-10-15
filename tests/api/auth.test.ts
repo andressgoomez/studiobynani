@@ -75,4 +75,57 @@ describe('acceso y permisos', () => {
     await instance.inject({ method: 'PATCH', url: '/api/v1/admin/employees/lula/status', headers: { cookie }, payload: { active: true } });
     await instance.inject({ method: 'PATCH', url: '/api/v1/admin/employees/lula/pin', headers: { cookie }, payload: { pin: '1234' } });
   });
+
+  it('permite a NANI cambiar su propio PIN sin poder desactivarse', async () => {
+    const instance = await app();
+    const login = await instance.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { userId: 'nani', pin: '1234' } });
+    const setCookie = Array.isArray(login.headers['set-cookie']) ? login.headers['set-cookie'][0] : login.headers['set-cookie'];
+    const cookie = setCookie?.split(';')[0];
+    const other = await instance.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { userId: 'nani', pin: '1234' } });
+    const otherCookie = (Array.isArray(other.headers['set-cookie']) ? other.headers['set-cookie'][0] : other.headers['set-cookie'])?.split(';')[0];
+    let changed = false;
+    try {
+      const rejected = await instance.inject({
+        method: 'PATCH', url: '/api/v1/admin/employees/nani/pin', headers: { cookie },
+        payload: { pin: '4321', confirmPin: '4321', currentPin: '0000' }
+      });
+      expect(rejected.statusCode).toBe(400);
+      const mismatched = await instance.inject({
+        method: 'PATCH', url: '/api/v1/admin/employees/nani/pin', headers: { cookie },
+        payload: { pin: '4321', confirmPin: '1111', currentPin: '1234' }
+      });
+      expect(mismatched.statusCode).toBe(400);
+      expect((await instance.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { userId: 'nani', pin: '1234' } })).statusCode).toBe(200);
+      const pin = await instance.inject({
+        method: 'PATCH', url: '/api/v1/admin/employees/nani/pin', headers: { cookie },
+        payload: { pin: '4321', confirmPin: '4321', currentPin: '1234' }
+      });
+      changed = pin.statusCode === 200;
+      expect(pin.statusCode).toBe(200);
+      expect(pin.json()).toEqual({ employeeId: 'nani' });
+      expect(JSON.stringify(pin.json())).not.toContain('4321');
+      expect((await instance.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { userId: 'nani', pin: '4321' } })).statusCode).toBe(200);
+      expect((await instance.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { userId: 'nani', pin: '1234' } })).statusCode).toBe(401);
+      expect((await instance.inject({ method: 'GET', url: '/api/v1/auth/session', headers: { cookie } })).statusCode).toBe(200);
+      expect((await instance.inject({ method: 'GET', url: '/api/v1/auth/session', headers: { cookie: otherCookie } })).statusCode).toBe(401);
+      expect((await instance.inject({ method: 'PATCH', url: '/api/v1/admin/employees/nani/status', headers: { cookie }, payload: { active: false } })).statusCode).toBe(404);
+      const lula = await instance.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { userId: 'lula', pin: '1234' } });
+      const lulaCookie = (Array.isArray(lula.headers['set-cookie']) ? lula.headers['set-cookie'][0] : lula.headers['set-cookie'])?.split(';')[0];
+      expect((await instance.inject({
+        method: 'PATCH', url: '/api/v1/admin/employees/nani/pin', headers: { cookie: lulaCookie },
+        payload: { pin: '9999', confirmPin: '9999', currentPin: '4321' }
+      })).statusCode).toBe(403);
+      expect((await instance.inject({ method: 'POST', url: '/api/v1/auth/login', payload: { userId: 'nani', pin: '4321' } })).statusCode).toBe(200);
+      const logs = await instance.inject({ method: 'GET', url: '/api/v1/admin/audit-logs?action=account.pin_changed', headers: { cookie } });
+      expect(logs.json().logs[0].action).toBe('account.pin_changed');
+    } finally {
+      if (changed) {
+        const restored = await instance.inject({
+          method: 'PATCH', url: '/api/v1/admin/employees/nani/pin', headers: { cookie },
+          payload: { pin: '1234', confirmPin: '1234', currentPin: '4321' }
+        });
+        expect(restored.statusCode).toBe(200);
+      }
+    }
+  });
 });

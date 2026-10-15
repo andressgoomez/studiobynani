@@ -1280,13 +1280,38 @@ export function buildApp(): FastifyInstance {
     if (session.id !== 'nani' || !can(session, 'admin:write')) {
       return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'No tenés permisos para esta función.' } });
     }
-    if (typeof request.body?.pin !== 'string' || !/^\d{4}$/.test(request.body.pin)) {
+    const pin = request.body?.pin;
+    if (typeof pin !== 'string' || !/^\d{4}$/.test(pin)) {
       return validation(reply, { pin: 'El PIN debe tener exactamente 4 dígitos.' });
     }
-    const employee = await prisma.user.findFirst({ where: { id: request.params.employeeId, role: 'EMPLOYEE' } });
+    const isOwnAdminPin = request.params.employeeId === session.id && session.role === 'ADMIN';
+    const employee = await prisma.user.findFirst({
+      where: { id: request.params.employeeId, role: isOwnAdminPin ? 'ADMIN' : 'EMPLOYEE' }
+    });
     if (!employee) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Empleada no encontrada.' } });
-    await prisma.user.update({ where: { id: employee.id }, data: { pinHash: hashPin(request.body.pin) } });
-    await audit(session.id, 'employee.pin_changed', 'User', employee.id);
+    if (isOwnAdminPin) {
+      const currentPin = (request.body as { currentPin?: unknown } | undefined)?.currentPin;
+      const confirmPin = (request.body as { confirmPin?: unknown } | undefined)?.confirmPin;
+      if (typeof confirmPin !== 'string' || confirmPin !== pin) {
+        return validation(reply, { confirmPin: 'Repetí el mismo PIN nuevo.' });
+      }
+      if (typeof currentPin !== 'string' || !verifyPin(currentPin, employee.pinHash)) {
+        return validation(reply, { currentPin: 'El PIN actual no coincide.' });
+      }
+    }
+    const action = isOwnAdminPin ? 'account.pin_changed' : 'employee.pin_changed';
+    await prisma.$transaction(async (transaction) => {
+      await transaction.user.update({ where: { id: employee.id }, data: { pinHash: hashPin(pin) } });
+      await transaction.auditLog.create({
+        data: { id: randomUUID(), actorId: session.id, action, entityType: 'User', entityId: employee.id, detailsJson: '{}' }
+      });
+    });
+    if (isOwnAdminPin) {
+      const currentToken = request.cookies[SESSION_COOKIE];
+      for (const [token, stored] of sessions) {
+        if (stored.id === employee.id && token !== currentToken) sessions.delete(token);
+      }
+    }
     return { employeeId: employee.id };
   });
 

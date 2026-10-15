@@ -95,7 +95,8 @@ function auditActionLabel(action: string) {
     'expense.deleted': 'Eliminó un gasto',
     'employee.activated': 'Activó una empleada',
     'employee.deactivated': 'Desactivó una empleada',
-    'employee.pin_changed': 'Cambió el PIN de una empleada'
+    'employee.pin_changed': 'Cambió el PIN de una empleada',
+    'account.pin_changed': 'Cambió su PIN'
   };
   return labels[action] ?? action;
 }
@@ -182,6 +183,8 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
   const [employeeError, setEmployeeError] = useState('');
   const [pinEmployeeId, setPinEmployeeId] = useState<string | null>(null);
   const [newPin, setNewPin] = useState('');
+  const [currentOwnPin, setCurrentOwnPin] = useState('');
+  const [confirmOwnPin, setConfirmOwnPin] = useState('');
   const [newEmployeeName, setNewEmployeeName] = useState('');
   const [newEmployeePin, setNewEmployeePin] = useState('');
   const [employeeCreateSaving, setEmployeeCreateSaving] = useState(false);
@@ -724,11 +727,12 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     try {
       const response = await fetch(`${API}/admin/employees/${pinEmployeeId}/pin`, {
         method: 'PATCH', credentials: 'include', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ pin: newPin })
+        body: JSON.stringify(pinEmployeeId === 'nani' ? { pin: newPin, currentPin: currentOwnPin, confirmPin: confirmOwnPin } : { pin: newPin })
       });
       const data = await response.json();
-      if (!response.ok) return setEmployeeError(data.error?.message ?? 'No se pudo cambiar el PIN.');
-      setPinEmployeeId(null); setNewPin('');
+      if (!response.ok) return setEmployeeError(data.error?.fields?.currentPin ?? data.error?.fields?.confirmPin ?? data.error?.message ?? 'No se pudo cambiar el PIN.');
+      if (pinEmployeeId === 'nani') showSuccess('Tu PIN quedó actualizado.');
+      setPinEmployeeId(null); setNewPin(''); setCurrentOwnPin(''); setConfirmOwnPin('');
     } catch {
       setEmployeeError('No se pudo conectar con la aplicación.');
     } finally {
@@ -989,7 +993,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
       </section>}
       {isAdmin && adminTab === 'employees' && <section className="catalog" aria-labelledby="employees-title">
         <h2 id="employees-title">Equipo</h2>
-        <p className="muted">Activá o desactivá el acceso y actualizá el PIN de cada empleada. Los PIN nunca se muestran.</p>
+        <p className="muted">Actualizá tu PIN y el de cada empleada. También podés activar o desactivar su acceso. Los PIN nunca se muestran.</p>
         {employeeError && <p className="error" role="alert">{employeeError}</p>}
         <form onSubmit={createEmployee} className="employee-create-form" noValidate>
           <div><label htmlFor="new-employee-name">Nueva empleada</label><input id="new-employee-name" value={newEmployeeName} onChange={(event) => setNewEmployeeName(event.target.value)} placeholder="Nombre completo" required /></div>
@@ -997,6 +1001,25 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
           <button disabled={employeeCreateSaving || !/^\d{4}$/.test(newEmployeePin)} type="submit">{employeeCreateSaving ? 'Guardando…' : 'Agregar empleada'}</button>
         </form>
         <div className="catalog-list">
+          <article className="catalog-card">
+            <div><strong>NANI</strong><span>Tu acceso</span></div>
+            <div className="catalog-actions">
+              <button className="secondary" type="button" onClick={() => { setPinEmployeeId('nani'); setNewPin(''); setCurrentOwnPin(''); setConfirmOwnPin(''); }}>Cambiar PIN</button>
+            </div>
+            {pinEmployeeId === 'nani' && <form onSubmit={changeEmployeePin}>
+              <label htmlFor="pin-nani-current">PIN actual</label>
+              <input id="pin-nani-current" inputMode="numeric" type="password" autoComplete="current-password" maxLength={4} value={currentOwnPin}
+                onChange={(event) => setCurrentOwnPin(event.target.value.replace(/\D/g, '').slice(0, 4))} required />
+              <label htmlFor="pin-nani">Nuevo PIN</label>
+              <input id="pin-nani" inputMode="numeric" type="password" autoComplete="new-password" maxLength={4} value={newPin}
+                onChange={(event) => setNewPin(event.target.value.replace(/\D/g, '').slice(0, 4))} required />
+              <label htmlFor="pin-nani-confirm">Repetir PIN nuevo</label>
+              <input id="pin-nani-confirm" inputMode="numeric" type="password" autoComplete="new-password" maxLength={4} value={confirmOwnPin}
+                onChange={(event) => setConfirmOwnPin(event.target.value.replace(/\D/g, '').slice(0, 4))} required />
+              <div className="home-actions"><button disabled={pinSaving || !/^\d{4}$/.test(currentOwnPin) || !/^\d{4}$/.test(newPin) || newPin !== confirmOwnPin} type="submit">{pinSaving ? 'Guardando…' : 'Guardar PIN'}</button>
+                <button className="secondary" type="button" onClick={() => { setPinEmployeeId(null); setCurrentOwnPin(''); setConfirmOwnPin(''); }}>Cancelar</button></div>
+            </form>}
+          </article>
           {managedEmployees.map((employee) => <article className={`catalog-card ${employee.active ? '' : 'catalog-inactive'}`} key={employee.id}>
             <div><strong>{employee.displayName}</strong><span>{employee.active ? 'Activa' : 'Inactiva'}</span></div>
             <div className="catalog-actions">
