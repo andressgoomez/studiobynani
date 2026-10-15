@@ -96,7 +96,9 @@ function auditActionLabel(action: string) {
     'employee.activated': 'Activó una empleada',
     'employee.deactivated': 'Desactivó una empleada',
     'employee.pin_changed': 'Cambió el PIN de una empleada',
-    'account.pin_changed': 'Cambió su PIN'
+    'account.pin_changed': 'Cambió su PIN',
+    'product.deleted': 'Eliminó un producto',
+    'product.stock_adjusted': 'Actualizó el stock de un producto'
   };
   return labels[action] ?? action;
 }
@@ -297,6 +299,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
     window.setTimeout(() => setSuccessMessage(''), 2500);
   }
   const [restockSearch, setRestockSearch] = useState('');
+  const [stockDrafts, setStockDrafts] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -541,7 +544,8 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
 
   async function saveProductSale(event: React.FormEvent) {
     event.preventDefault();
-    const items = Object.entries(productQuantities).filter(([, quantity]) => quantity > 0).map(([productId, quantity]) => ({ productId, quantity }));
+    const activeIds = new Set(products.filter((product) => product.active).map((product) => product.id));
+    const items = Object.entries(productQuantities).filter(([productId, quantity]) => quantity > 0 && activeIds.has(productId)).map(([productId, quantity]) => ({ productId, quantity }));
     if (!productClientName.trim() || items.length === 0) return setProductError('Ingresá la clienta y elegí al menos un producto.');
     setProductSaving(true); setProductError('');
     try {
@@ -622,8 +626,31 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
       if (!response.ok) throw new Error(data.error?.message ?? 'No se pudo registrar la compra.');
       const refreshed = await fetch(`${API}/products`, { credentials: 'include' });
       if (refreshed.ok) setProducts((await refreshed.json()).products ?? []);
+      setStockDrafts((current) => { const next = { ...current }; delete next[restockId]; return next; });
       setRestockId(null); setRestockQuantity(''); setRestockCost(''); setRestockSalePrice('');
     } catch (failure) { setProductError(failure instanceof Error ? failure.message : 'No se pudo registrar la compra.'); }
+    finally { setProductSaving(false); }
+  }
+
+  async function saveProductStock(event: React.FormEvent, product: Product) {
+    event.preventDefault();
+    const raw = (stockDrafts[product.id] ?? String(product.stock)).trim();
+    const stock = Number(raw);
+    if (!/^\d+$/.test(raw) || !Number.isInteger(stock)) {
+      setProductError('Ingresá una cantidad entera, cero o mayor.');
+      return;
+    }
+    setProductSaving(true); setProductError('');
+    try {
+      const response = await fetch(`${API}/admin/products/${encodeURIComponent(product.id)}/stock`, { method: 'PATCH', credentials: 'include', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ stock }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error?.message ?? 'No se pudo actualizar el stock.');
+      setProducts((current) => current.map((item) => item.id === product.id ? { ...item, stock: data.product.stock } : item));
+      const refreshed = await fetch(`${API}/products`, { credentials: 'include' });
+      if (refreshed.ok) setProducts((await refreshed.json()).products ?? []);
+      setStockDrafts((current) => { const next = { ...current }; delete next[product.id]; return next; });
+      showSuccess('Stock actualizado.');
+    } catch (failure) { setProductError(failure instanceof Error ? failure.message : 'No se pudo actualizar el stock.'); }
     finally { setProductSaving(false); }
   }
 
@@ -635,6 +662,8 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error?.message ?? 'No se pudo eliminar el producto.');
       setProducts((current) => current.filter((item) => item.id !== productToDelete.id));
+      setProductQuantities((current) => { const next = { ...current }; delete next[productToDelete.id]; return next; });
+      setStockDrafts((current) => { const next = { ...current }; delete next[productToDelete.id]; return next; });
       setProductToDelete(null);
       showSuccess('Producto eliminado correctamente.');
     } catch (failure) {
@@ -1186,7 +1215,7 @@ function Home({ user, onLogout }: { user: PublicUser; onLogout: () => void }) {
           </form>
           <label className="product-inventory-search" htmlFor="restock-search">Buscar producto</label>
           <input id="restock-search" type="search" value={restockSearch} onChange={(event) => setRestockSearch(event.target.value)} placeholder="Escribí el nombre del producto…" />
-          <div className="catalog-list product-inventory-list">{[...products].filter((product) => product.name.toLocaleLowerCase().includes(restockSearch.toLocaleLowerCase())).sort((first, second) => Number(first.stock <= 0) - Number(second.stock <= 0)).map((product) => <article className={`catalog-card product-inventory-row ${product.stock <= 0 ? 'product-out-of-stock' : ''}`} key={product.id}><div><strong>{product.name}</strong><span>{product.supplierType === 'once' ? 'Once' : 'Proveedor local'}</span></div><span className="product-inventory-stock">{product.stock > 0 ? `${product.stock} disponibles` : 'Sin stock'}</span><span className="product-inventory-price">{formatAmount(product.salePriceCents)}</span><div className="catalog-actions"><button className="secondary" type="button" onClick={() => { setRestockId(product.id); setRestockQuantity(''); setRestockCost(String(product.currentCostCents / 100)); setRestockSalePrice(String(product.salePriceCents / 100)); }}>Reponer</button><button className="danger-button" type="button" onClick={() => setProductToDelete(product)}>Eliminar</button></div>{restockId === product.id && <form onSubmit={restockProduct} className="inline-form"><div><label htmlFor={`restock-quantity-${product.id}`}>Cantidad a ingresar</label><input id={`restock-quantity-${product.id}`} type="number" min="1" step="1" value={restockQuantity} onChange={(event) => setRestockQuantity(event.target.value)} required /></div><div><label htmlFor={`restock-cost-${product.id}`}>Precio de compra</label><input id={`restock-cost-${product.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={restockCost} onChange={(event) => setRestockCost(event.target.value)} required /></div><div><label htmlFor={`restock-sale-price-${product.id}`}>Precio de venta</label><input id={`restock-sale-price-${product.id}`} type="number" min="0.01" step="0.01" inputMode="decimal" value={restockSalePrice} onChange={(event) => setRestockSalePrice(event.target.value)} required /></div><button disabled={productSaving} type="submit">Guardar compra</button></form>}</article>)}</div>
+          <div className="catalog-list product-inventory-list">{[...products].filter((product) => product.active && product.name.toLocaleLowerCase().includes(restockSearch.toLocaleLowerCase())).sort((first, second) => Number(first.stock <= 0) - Number(second.stock <= 0)).map((product) => <article className={`catalog-card product-inventory-row ${product.stock <= 0 ? 'product-out-of-stock' : ''}`} key={product.id}><div><strong>{product.name}</strong><span>{product.supplierType === 'once' ? 'Once' : 'Proveedor local'}</span></div><form className="product-inventory-stock product-stock-edit" onSubmit={(event) => saveProductStock(event, product)}><label htmlFor={`stock-${product.id}`}>Stock</label><input id={`stock-${product.id}`} type="number" min="0" step="1" value={stockDrafts[product.id] ?? String(product.stock)} onChange={(event) => setStockDrafts((current) => ({ ...current, [product.id]: event.target.value }))} /><button className="secondary" type="submit" disabled={productSaving}>Guardar</button></form><span className="product-inventory-price">{formatAmount(product.salePriceCents)}</span><div className="catalog-actions"><button className="secondary" type="button" onClick={() => { setRestockId(product.id); setRestockQuantity(''); setRestockCost(String(product.currentCostCents / 100)); setRestockSalePrice(String(product.salePriceCents / 100)); }}>Reponer</button><button className="danger-button" type="button" onClick={() => setProductToDelete(product)}>Eliminar</button></div>{restockId === product.id && <form onSubmit={restockProduct} className="inline-form"><div><label htmlFor={`restock-quantity-${product.id}`}>Cantidad a ingresar</label><input id={`restock-quantity-${product.id}`} type="number" min="1" step="1" value={restockQuantity} onChange={(event) => setRestockQuantity(event.target.value)} required /></div><div><label htmlFor={`restock-cost-${product.id}`}>Precio de compra</label><input id={`restock-cost-${product.id}`} type="number" min="0" step="0.01" inputMode="decimal" value={restockCost} onChange={(event) => setRestockCost(event.target.value)} required /></div><div><label htmlFor={`restock-sale-price-${product.id}`}>Precio de venta</label><input id={`restock-sale-price-${product.id}`} type="number" min="0.01" step="0.01" inputMode="decimal" value={restockSalePrice} onChange={(event) => setRestockSalePrice(event.target.value)} required /></div><button disabled={productSaving} type="submit">Guardar compra</button></form>}</article>)}</div>
         </div>}
         <form onSubmit={saveProductSale} className="product-sale-form" noValidate>
           <label htmlFor="product-client">Clienta</label><input id="product-client" value={productClientName} onChange={(event) => setProductClientName(event.target.value)} placeholder="Nombre completo" required />
