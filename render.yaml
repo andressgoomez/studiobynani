@@ -5,7 +5,7 @@ services:
     plan: free
     region: ohio
     buildCommand: npm install --include=dev && npx prisma generate && npm run build --workspace @studiobynani/web
-    startCommand: node -e "require('node:fs').mkdirSync('prisma/data',{recursive:true})" && npx prisma migrate deploy && npx tsx apps/api/src/server.ts
+    startCommand: node -e "require('node:fs').mkdirSync('prisma/data',{recursive:true})" && npx prisma db push --skip-generate --accept-data-loss && npx tsx apps/api/src/server.ts
     healthCheckPath: /api/v1/health
     envVars:
       - key: NODE_VERSION
