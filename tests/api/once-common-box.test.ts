@@ -80,6 +80,7 @@ describe('productos Once en la caja común', () => {
 
       const after = await app.inject({ method: 'GET', url: `/api/v1/admin/daily-summary?date=${date}`, headers: { cookie: nani } });
       const lulaAfter = after.json().employees.find((employee: { employeeId: string }) => employee.employeeId === 'lula');
+      expect(lulaAfter.cashCents - lulaBefore.cashCents).toBe(40000);
       expect(lulaAfter.commonBoxCents - lulaBefore.commonBoxCents).toBe(20000);
       expect(lulaAfter.productAmountToNaniCents - lulaBefore.productAmountToNaniCents).toBe(14000);
       expect(lulaAfter.amountToNaniCents - lulaBefore.amountToNaniCents).toBe(14000);

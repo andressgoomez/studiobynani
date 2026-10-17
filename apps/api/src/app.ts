@@ -867,6 +867,8 @@ export function buildApp(): FastifyInstance {
       current.productAmountToNaniCents += sale.amountToNaniCents;
       current.amountToNaniCents += sale.amountToNaniCents;
       current.commonBoxCents += sale.commonBoxCents;
+      if (sale.paymentMethod === 'cash') current.cashCents += sale.totalCents;
+      else current.transferCents += sale.totalCents;
       employees.set(sale.sellerId, current);
     }
     const totals = [...employees.values()].reduce((sum, employee) => ({
