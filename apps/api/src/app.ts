@@ -895,6 +895,7 @@ export function buildApp(): FastifyInstance {
         .sort((first, second) => second.createdAt.getTime() - first.createdAt.getTime())
         .map((attendance) => ({
           id: attendance.id,
+          employeeId: attendance.employeeId,
           employeeName: attendance.employee.displayName,
           clientName: attendance.clientName,
           serviceName: attendance.service.name,
