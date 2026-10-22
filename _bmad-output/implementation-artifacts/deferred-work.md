@@ -95,3 +95,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-reordenar-servicios.md`
   summary: Si el guardado de un arrastre falla, la pantalla vuelve al orden anterior y no hay un test que lo ejecute.
   evidence: Ese retorno está solo en el manejador del navegador. `npm test` inyecta la API y no monta la pantalla.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-precio-efectivo-combo-ideal.md`
+  summary: La lista de precios de las reglas financieras no coincide con el catálogo en código para varios servicios que no son el Combo Ideal.
+  evidence: `INITIAL_SERVICES` ya tenía otros importes y duraciones (maquillaje + perfilado, limpiezas, dermapen, Hydra Lips, maquillaje social) antes de este cambio. Esta modificación no los tocó.

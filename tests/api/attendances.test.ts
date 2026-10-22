@@ -47,6 +47,38 @@ describe('atenciones', () => {
     expect(calculateAttendanceAmounts('lula', { id: 'laminado-cejas', name: 'Laminado', baseAmountCents: 2200000 }, 'cash', 'performed')).toMatchObject({
       discountCents: 220000, finalAmountCents: 1980000
     });
+
+    const comboTransfer = await app.inject({
+      method: 'POST', url: '/api/v1/attendances/quote', headers: { cookie },
+      payload: { serviceId: 'combo-ideal', paymentMethod: 'transfer' }
+    });
+    expect(comboTransfer.statusCode).toBe(200);
+    expect(comboTransfer.json().quote).toMatchObject({
+      baseAmountCents: 4600000, discountCents: 0, finalAmountCents: 4600000
+    });
+    const comboCash = await app.inject({
+      method: 'POST', url: '/api/v1/attendances/quote', headers: { cookie },
+      payload: { serviceId: 'combo-ideal', paymentMethod: 'cash' }
+    });
+    expect(comboCash.statusCode).toBe(200);
+    expect(comboCash.json().quote).toMatchObject({
+      discountCents: 400000, finalAmountCents: 4200000, commissionCents: 2940000, amountToNaniCents: 1260000
+    });
+    expect(calculateAttendanceAmounts('lola', { id: 'combo-ideal', name: 'Combo Ideal', baseAmountCents: 4600000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 400000, finalAmountCents: 4200000, commissionCents: 2520000, amountToNaniCents: 1680000
+    });
+    expect(calculateAttendanceAmounts('nani', { id: 'combo-ideal', name: 'Combo Ideal', baseAmountCents: 4600000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 400000, finalAmountCents: 4200000, commissionCents: 4200000, amountToNaniCents: 0
+    });
+    expect(calculateAttendanceAmounts('ledis', { id: 'combo-ideal', name: 'Combo Ideal', baseAmountCents: 4600000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 0, finalAmountCents: 4600000
+    });
+    expect(calculateAttendanceAmounts('lula', { id: 'combo-ideal', name: 'Combo Ideal', baseAmountCents: 4000000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 0, finalAmountCents: 4000000
+    });
+    expect(calculateAttendanceAmounts('lula', { id: 'combo-ideal', name: 'Combo Ideal', baseAmountCents: 5000000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 800000, finalAmountCents: 4200000
+    });
   });
 
   it('no descuenta maquillaje en la cotización y rechaza servicio ajeno', async () => {

@@ -13,7 +13,7 @@
 
 - El precio informado en el catálogo es el precio de transferencia.
 - La clienta paga el total en efectivo o transferencia; no se permiten pagos combinados.
-- Los servicios de NANI, LULA y LOLA que no sean de maquillaje tienen 10% de descuento en efectivo, salvo el perfilado de cejas: en efectivo se cobra $20.000.
+- Los servicios de NANI, LULA y LOLA que no sean de maquillaje tienen 10% de descuento en efectivo, salvo el perfilado de cejas ($20.000 en efectivo) y el Combo Ideal ($42.000 en efectivo).
 - Los servicios de LEDIS no tienen descuento en efectivo.
 - Los servicios de maquillaje no tienen descuento, incluyendo maquillaje social, maquillaje + perfilado y clase de automaquillaje.
 - Canceladas y ausentes no generan cargo, comisión ni entrega a NANI.
@@ -26,7 +26,7 @@ Los precios son configurables y cada atención conserva el precio aplicado. Los 
 
 - Perfilado de cejas — $22.000 por transferencia; $20.000 en efectivo (el 10% es simbólico, no $19.800) — 30 minutos.
 - Lash Lifting — $35.000 — 1 hora.
-- Combo Ideal (perfilado de cejas + lash lifting, con o sin tinte) — $46.000 — 1 hora 30 minutos.
+- Combo Ideal (perfilado de cejas + lash lifting, con o sin tinte) — $46.000 por transferencia; $42.000 en efectivo (el 10% es simbólico, no $41.400) — 1 hora 30 minutos.
 - Combo Perfecto x3 (perfilado, laminado + lash lifting, con o sin tinte) — $54.000 — 1 hora 30 minutos.
 - Combo Full Cejas (perfilado + laminado y nutrición) — $38.000 — 1 hora.
 - Combo laminado de cejas sin perfilado + lifting con tinte — $43.000 — 1 hora.
@@ -52,6 +52,7 @@ Los precios son configurables y cada atención conserva el precio aplicado. Los 
 
 - `precioFinal = precioTransferencia` cuando el medio de pago es transferencia.
 - `precioFinal = min(precioTransferencia, 20000)` para Perfilado de cejas en efectivo. Con el precio actual se descuentan $2.000 y se cobra $20.000. Si el catálogo baja de $20.000, no hay descuento.
+- `precioFinal = min(precioTransferencia, 42000)` para Combo Ideal en efectivo. Con el precio actual se descuentan $4.000 y se cobra $42.000. Si el catálogo baja de $42.000, no hay descuento.
 - `precioFinal = precioTransferencia * 0,90` para el resto de los servicios que corresponden descuento en efectivo.
 - `comisionEmpleada = precioFinal * porcentajeEmpleada`.
 - `entregaANani = precioFinal - comisionEmpleada` para LULA, LOLA y LEDIS.

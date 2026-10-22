@@ -250,6 +250,12 @@ export const INITIAL_SERVICES: readonly Service[] = [
 
 const commissionRates: Record<UserId, number> = { nani: 100, lula: 70, lola: 60, ledis: 70 };
 
+// El 10% de estos servicios es simbólico: en efectivo se cobra un importe redondo, no el 10% exacto.
+const symbolicCashFinalCents: Partial<Record<string, number>> = {
+  'perfilado-cejas': 2_000_000,
+  'combo-ideal': 4_200_000
+};
+
 export function calculateAttendanceAmounts(
   employeeId: UserId,
   service: Pick<Service, 'id' | 'name' | 'baseAmountCents'>,
@@ -261,9 +267,9 @@ export function calculateAttendanceAmounts(
   }
   const isMakeup = service.id.startsWith('maquillaje-') || service.id === 'clase-automaquillaje' || service.id === 'prueba-maquillaje';
   const hasCashDiscount = paymentMethod === 'cash' && employeeId !== 'ledis' && !isMakeup;
-  // El 10% del perfilado es simbólico: en efectivo se cobra $20.000, no el 10% exacto ($19.800).
+  const cashFinalCents = symbolicCashFinalCents[service.id];
   const discountCents = !hasCashDiscount ? 0
-    : service.id === 'perfilado-cejas' ? Math.max(0, service.baseAmountCents - 2_000_000)
+    : cashFinalCents !== undefined ? Math.max(0, service.baseAmountCents - cashFinalCents)
     : Math.round(service.baseAmountCents * 0.1);
   const finalAmountCents = service.baseAmountCents - discountCents;
   const commissionCents = Math.round(finalAmountCents * commissionRates[employeeId] / 100);
