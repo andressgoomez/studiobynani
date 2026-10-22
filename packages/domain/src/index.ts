@@ -261,7 +261,10 @@ export function calculateAttendanceAmounts(
   }
   const isMakeup = service.id.startsWith('maquillaje-') || service.id === 'clase-automaquillaje' || service.id === 'prueba-maquillaje';
   const hasCashDiscount = paymentMethod === 'cash' && employeeId !== 'ledis' && !isMakeup;
-  const discountCents = hasCashDiscount ? Math.round(service.baseAmountCents * 0.1) : 0;
+  // El 10% del perfilado es simbólico: en efectivo se cobra $20.000, no el 10% exacto ($19.800).
+  const discountCents = !hasCashDiscount ? 0
+    : service.id === 'perfilado-cejas' ? Math.max(0, service.baseAmountCents - 2_000_000)
+    : Math.round(service.baseAmountCents * 0.1);
   const finalAmountCents = service.baseAmountCents - discountCents;
   const commissionCents = Math.round(finalAmountCents * commissionRates[employeeId] / 100);
   return {

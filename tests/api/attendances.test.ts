@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { PrismaClient } from '@prisma/client';
+import { calculateAttendanceAmounts } from '@studiobynani/domain';
 import { buildApp } from '../../apps/api/src/app.js';
 
 describe('atenciones', () => {
@@ -37,7 +38,15 @@ describe('atenciones', () => {
       payload: { serviceId: 'perfilado-cejas', paymentMethod: 'cash' }
     });
     expect(cash.statusCode).toBe(200);
-    expect(cash.json().quote).toMatchObject({ discountCents: 220000, finalAmountCents: 1980000 });
+    expect(cash.json().quote).toMatchObject({
+      discountCents: 200000, finalAmountCents: 2000000, commissionCents: 1400000, amountToNaniCents: 600000
+    });
+    expect(calculateAttendanceAmounts('lola', { id: 'perfilado-cejas', name: 'Perfilado', baseAmountCents: 2200000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 200000, finalAmountCents: 2000000, commissionCents: 1200000, amountToNaniCents: 800000
+    });
+    expect(calculateAttendanceAmounts('lula', { id: 'laminado-cejas', name: 'Laminado', baseAmountCents: 2200000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 220000, finalAmountCents: 1980000
+    });
   });
 
   it('no descuenta maquillaje en la cotización y rechaza servicio ajeno', async () => {
@@ -68,7 +77,7 @@ describe('atenciones', () => {
     expect(response.statusCode).toBe(201);
     expect(response.json().attendance).toMatchObject({
       employeeId: 'lula', clientName: 'Ana Pérez', baseAmountCents: 2200000,
-      discountCents: 220000, finalAmountCents: 1980000, commissionCents: 1386000, amountToNaniCents: 594000
+      discountCents: 200000, finalAmountCents: 2000000, commissionCents: 1400000, amountToNaniCents: 600000
     });
   });
 
