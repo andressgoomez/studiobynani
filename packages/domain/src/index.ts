@@ -253,7 +253,8 @@ const commissionRates: Record<UserId, number> = { nani: 100, lula: 70, lola: 60,
 // El 10% de estos servicios es simbólico: en efectivo se cobra un importe redondo, no el 10% exacto.
 const symbolicCashFinalCents: Partial<Record<string, number>> = {
   'perfilado-cejas': 2_000_000,
-  'combo-ideal': 4_200_000
+  'combo-ideal': 4_200_000,
+  'combo-perfecto-x3': 4_800_000
 };
 
 export function calculateAttendanceAmounts(

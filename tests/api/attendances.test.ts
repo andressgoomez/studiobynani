@@ -79,6 +79,42 @@ describe('atenciones', () => {
     expect(calculateAttendanceAmounts('lula', { id: 'combo-ideal', name: 'Combo Ideal', baseAmountCents: 5000000 }, 'cash', 'performed')).toMatchObject({
       discountCents: 800000, finalAmountCents: 4200000
     });
+
+    const perfectoTransfer = await app.inject({
+      method: 'POST', url: '/api/v1/attendances/quote', headers: { cookie },
+      payload: { serviceId: 'combo-perfecto-x3', paymentMethod: 'transfer' }
+    });
+    expect(perfectoTransfer.statusCode).toBe(200);
+    expect(perfectoTransfer.json().quote).toMatchObject({
+      baseAmountCents: 5400000, discountCents: 0, finalAmountCents: 5400000,
+      commissionCents: 3780000, amountToNaniCents: 1620000
+    });
+    const perfectoCash = await app.inject({
+      method: 'POST', url: '/api/v1/attendances/quote', headers: { cookie },
+      payload: { serviceId: 'combo-perfecto-x3', paymentMethod: 'cash' }
+    });
+    expect(perfectoCash.statusCode).toBe(200);
+    expect(perfectoCash.json().quote).toMatchObject({
+      discountCents: 600000, finalAmountCents: 4800000, commissionCents: 3360000, amountToNaniCents: 1440000
+    });
+    expect(calculateAttendanceAmounts('lola', { id: 'combo-perfecto-x3', name: 'Combo Perfecto', baseAmountCents: 5400000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 600000, finalAmountCents: 4800000, commissionCents: 2880000, amountToNaniCents: 1920000
+    });
+    expect(calculateAttendanceAmounts('nani', { id: 'combo-perfecto-x3', name: 'Combo Perfecto', baseAmountCents: 5400000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 600000, finalAmountCents: 4800000, commissionCents: 4800000, amountToNaniCents: 0
+    });
+    expect(calculateAttendanceAmounts('ledis', { id: 'combo-perfecto-x3', name: 'Combo Perfecto', baseAmountCents: 5400000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 0, finalAmountCents: 5400000, commissionCents: 3780000, amountToNaniCents: 1620000
+    });
+    expect(calculateAttendanceAmounts('lula', { id: 'combo-perfecto-x3', name: 'Combo Perfecto', baseAmountCents: 4500000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 0, finalAmountCents: 4500000
+    });
+    expect(calculateAttendanceAmounts('lula', { id: 'combo-perfecto-x3', name: 'Combo Perfecto', baseAmountCents: 4800000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 0, finalAmountCents: 4800000, commissionCents: 3360000, amountToNaniCents: 1440000
+    });
+    expect(calculateAttendanceAmounts('lula', { id: 'combo-perfecto-x3', name: 'Combo Perfecto', baseAmountCents: 6000000 }, 'cash', 'performed')).toMatchObject({
+      discountCents: 1200000, finalAmountCents: 4800000, commissionCents: 3360000, amountToNaniCents: 1440000
+    });
   });
 
   it('no descuenta maquillaje en la cotización y rechaza servicio ajeno', async () => {

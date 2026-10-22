@@ -99,3 +99,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-precio-efectivo-combo-ideal.md`
   summary: La lista de precios de las reglas financieras no coincide con el catálogo en código para varios servicios que no son el Combo Ideal.
   evidence: `INITIAL_SERVICES` ya tenía otros importes y duraciones (maquillaje + perfilado, limpiezas, dermapen, Hydra Lips, maquillaje social) antes de este cambio. Esta modificación no los tocó.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-precio-efectivo-combo-perfecto.md`
+  summary: La lista de precios de las reglas sigue sin coincidir con el catálogo en código en servicios que no son el Combo Perfecto.
+  evidence: Maquillaje social, maquillaje + perfilado y las limpiezas ya diferían entre `financial-rules.md` e `INITIAL_SERVICES` antes de fijar el efectivo del Combo Perfecto.
