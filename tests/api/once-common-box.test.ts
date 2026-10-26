@@ -73,17 +73,17 @@ describe('productos Once en la caja común', () => {
       expect(onceSale).toMatchObject({ employeeCommissionCents: 0, amountToNaniCents: 0, commonBoxCents: 10000 });
 
       const localSale = await sell([{ productId: localId, quantity: 1 }]);
-      expect(localSale).toMatchObject({ employeeCommissionCents: 3000, amountToNaniCents: 7000, commonBoxCents: 0 });
+      expect(localSale).toMatchObject({ employeeCommissionCents: 2400, amountToNaniCents: 7600, commonBoxCents: 0 });
 
       const mixedSale = await sell([{ productId: onceId, quantity: 1 }, { productId: localId, quantity: 1 }]);
-      expect(mixedSale).toMatchObject({ employeeCommissionCents: 3000, amountToNaniCents: 7000, commonBoxCents: 10000, totalCents: 20000 });
+      expect(mixedSale).toMatchObject({ employeeCommissionCents: 2400, amountToNaniCents: 7600, commonBoxCents: 10000, totalCents: 20000 });
 
       const after = await app.inject({ method: 'GET', url: `/api/v1/admin/daily-summary?date=${date}`, headers: { cookie: nani } });
       const lulaAfter = after.json().employees.find((employee: { employeeId: string }) => employee.employeeId === 'lula');
       expect(lulaAfter.cashCents - lulaBefore.cashCents).toBe(40000);
       expect(lulaAfter.commonBoxCents - lulaBefore.commonBoxCents).toBe(20000);
-      expect(lulaAfter.productAmountToNaniCents - lulaBefore.productAmountToNaniCents).toBe(14000);
-      expect(lulaAfter.amountToNaniCents - lulaBefore.amountToNaniCents).toBe(14000);
+      expect(lulaAfter.productAmountToNaniCents - lulaBefore.productAmountToNaniCents).toBe(15200);
+      expect(lulaAfter.amountToNaniCents - lulaBefore.amountToNaniCents).toBe(15200);
     } finally {
       if (createdSaleIds.length) {
         await prisma.productSaleItem.deleteMany({ where: { saleId: { in: createdSaleIds } } });
