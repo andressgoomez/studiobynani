@@ -106,7 +106,7 @@ function productFinancials(supplierType: string, sellerId: string, totalCents: n
       commonBoxCents: totalCents
     };
   }
-  const employeeCommissionCents = sellerId === 'nani' ? 0 : Math.floor(profitCents / 2);
+  const employeeCommissionCents = sellerId === 'nani' ? 0 : Math.floor(profitCents * 40 / 100);
   return {
     employeeCommissionCents,
     amountToNaniCents: sellerId === 'nani' ? 0 : totalCents - employeeCommissionCents,
